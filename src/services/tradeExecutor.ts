@@ -61,6 +61,18 @@ function roundToMarkPricePrecision(price: number, markPrice: number): string {
 }
 
 /**
+ * Leverage info for synchronization.
+ */
+export interface LeverageInfo {
+  /** Asset ID */
+  assetId: number;
+  /** Leverage value (e.g., 40 for 40x) */
+  leverage: number;
+  /** Is cross margin mode */
+  isCross: boolean;
+}
+
+/**
  * Dependencies for TradeExecutor.
  */
 export interface TradeExecutorDeps {
@@ -89,6 +101,12 @@ export interface TradeExecutorDeps {
    * If not provided, all positions will be copied.
    */
   historyTracker?: HistoryPositionTracker;
+  /**
+   * Whether to sync leverage settings with leader before opening positions.
+   * When true, follower's leverage will be set to match leader's leverage.
+   * @default true
+   */
+  syncLeverage?: boolean;
   /** Optional logger instance */
   log?: Logger;
 }
@@ -100,10 +118,58 @@ export class TradeExecutor {
   private syncing = false;
   private readonly log: Logger;
   private readonly minOrderNotionalUsd: number;
+  private readonly syncLeverage: boolean;
+  /** Cache of leverage settings already synced this session to avoid redundant API calls */
+  private readonly syncedLeverageCache = new Map<string, { leverage: number; isCross: boolean }>();
 
   constructor(private readonly deps: TradeExecutorDeps) {
     this.log = deps.log ?? logger;
     this.minOrderNotionalUsd = deps.minOrderNotionalUsd ?? DEFAULT_MIN_ORDER_NOTIONAL_USD;
+    this.syncLeverage = deps.syncLeverage ?? true;
+  }
+
+  /**
+   * Syncs leverage setting for a coin before opening a position.
+   * Only syncs if the leverage or mode has changed from cached value.
+   */
+  private async syncLeverageForCoin(
+    assetId: number,
+    coin: string,
+    leverage: number,
+    isCross: boolean,
+  ): Promise<void> {
+    if (!this.syncLeverage) return;
+
+    // Check cache to avoid redundant API calls
+    const cached = this.syncedLeverageCache.get(coin);
+    if (cached && cached.leverage === leverage && cached.isCross === isCross) {
+      this.log.debug(`Leverage already synced for ${coin}`, { leverage, isCross });
+      return;
+    }
+
+    try {
+      this.log.info(`Syncing leverage for ${coin}`, {
+        leverage,
+        mode: isCross ? "cross" : "isolated",
+      });
+
+      await this.deps.exchangeClient.updateLeverage({
+        asset: assetId,
+        isCross,
+        leverage: Math.floor(leverage), // Leverage must be an integer
+      });
+
+      // Update cache after successful sync
+      this.syncedLeverageCache.set(coin, { leverage: Math.floor(leverage), isCross });
+      this.log.info(`Leverage synced successfully for ${coin}`, { leverage: Math.floor(leverage) });
+    } catch (error) {
+      // Log warning but don't fail the trade - leverage sync is best-effort
+      this.log.warn(`Failed to sync leverage for ${coin}`, {
+        error: error instanceof Error ? error.message : String(error),
+        leverage,
+        isCross,
+      });
+    }
   }
 
   /**
@@ -341,6 +407,30 @@ export class TradeExecutor {
           notionalUsd: "$" + notionalUsd.toFixed(2),
           markPrice: markPx,
         });
+      }
+
+      // Sync leverage for coins that are being opened (not already in follower's positions)
+      // This ensures follower uses same leverage as leader for new positions
+      if (this.syncLeverage) {
+        for (const delta of processedDeltas) {
+          const currentSize = delta.current?.size ?? 0;
+          // Only sync leverage when opening a new position (currentSize ≈ 0)
+          if (Math.abs(currentSize) < MIN_ABS_DELTA) {
+            // Find the target for this coin to get leader's leverage settings
+            const target = targets.find((t) => t.coin === delta.coin);
+            if (target && target.leaderLeverageSetting > 0) {
+              const metadata = this.deps.metadataService.getByCoin(delta.coin);
+              if (metadata) {
+                await this.syncLeverageForCoin(
+                  metadata.assetId,
+                  delta.coin,
+                  target.leaderLeverageSetting,
+                  target.leaderLeverageType === "cross",
+                );
+              }
+            }
+          }
+        }
       }
 
       // Build orders for each actionable delta

@@ -5,6 +5,9 @@
 /** Direction of a position */
 export type PositionSide = "long" | "short" | "flat";
 
+/** Leverage mode type */
+export type LeverageType = "cross" | "isolated";
+
 /**
  * Immutable snapshot of a position at a point in time.
  */
@@ -17,8 +20,10 @@ export interface PositionSnapshot {
   entryPrice: number;
   /** Current position value in USD (abs(size) * markPrice) */
   positionValueUsd: number;
-  /** Current leverage multiplier */
+  /** Current leverage multiplier (e.g., 40 for 40x) */
   leverage: number;
+  /** Leverage type: "cross" or "isolated" */
+  leverageType: LeverageType;
   /** Margin currently allocated to this position in USD */
   marginUsedUsd: number;
   /** Estimated liquidation price, null if not available */

@@ -7,7 +7,7 @@
 
 import type { RiskConfig } from "../config/index.js";
 import { safeDivide } from "../utils/math.js";
-import type { PositionSnapshot } from "./types.js";
+import type { LeverageType, PositionSnapshot } from "./types.js";
 import { TraderStateStore } from "./traderState.js";
 import type { MarketMetadataService } from "../services/marketMetadata.js";
 
@@ -23,6 +23,10 @@ export interface TargetPosition {
   leaderLeverage: number;
   /** Current mark price for the asset */
   markPrice: number;
+  /** Leader's leverage setting (e.g., 40 for 40x) */
+  leaderLeverageSetting: number;
+  /** Leader's leverage type: "cross" or "isolated" */
+  leaderLeverageType: LeverageType;
 }
 
 /**
@@ -62,6 +66,8 @@ export class LeaderState extends TraderStateStore {
         leaderSize: position.size,
         leaderLeverage,
         markPrice,
+        leaderLeverageSetting: position.leverage,
+        leaderLeverageType: position.leverageType,
       };
     });
   }
