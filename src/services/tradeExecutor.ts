@@ -361,6 +361,44 @@ export class TradeExecutor {
           );
 
           // ============================================================
+          // SPECIAL CASE: Leader fully closed position (not in targets)
+          // ============================================================
+          // When leader closes entire position:
+          // - target is undefined (leader has no position)
+          // - delta.targetSize is 0
+          // - currentSize !== 0 (follower still has position)
+          // → Follower should also close position
+          if (!target && Math.abs(delta.targetSize) < 0.0001 && Math.abs(currentSize) > 0.0001) {
+            const closeNotional = Math.abs(currentSize) * markPx;
+            
+            // Skip if too small
+            if (closeNotional < dynamicThreshold) {
+              this.log.info(`⏭️ Skipping small close (leader fully closed)`, {
+                coin: delta.coin,
+                reason: "领航员已完全平仓，跟单者平仓金额太小跳过",
+                closeNotional: "$" + closeNotional.toFixed(2),
+                threshold: "$" + dynamicThreshold.toFixed(2),
+                currentSize: currentSize.toFixed(6),
+              });
+              return null;
+            }
+            
+            this.log.info(`⬜ Following leader's FULL CLOSE`, {
+              coin: delta.coin,
+              reason: "领航员完全平仓，跟单者跟随平仓",
+              closeNotional: "$" + closeNotional.toFixed(2),
+              currentSize: currentSize.toFixed(6),
+              newSize: "0",
+            });
+            
+            return {
+              ...delta,
+              deltaSize: -currentSize,
+              targetSize: 0,
+            };
+          }
+
+          // ============================================================
           // CASE 1: Leader has NO change → Skip (no action)
           // ============================================================
           if (Math.abs(leaderDeltaSize) < 0.0001) {
