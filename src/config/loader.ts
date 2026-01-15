@@ -10,6 +10,7 @@ import {
   CONFIG_DEFAULTS,
   type CopyPairConfig,
   type HyperliquidEnvironment,
+  type LogLevel,
   type MultiCopyTradingConfig,
   type PairRiskConfig,
 } from "./types.js";
@@ -122,6 +123,15 @@ export function loadConfigFromFile(configPath: string): MultiCopyTradingConfig {
     throw new Error(`Invalid environment: ${environment}. Must be "mainnet" or "testnet"`);
   }
 
+  // Validate log level (can also be overridden by LOG_LEVEL env var)
+  const configLogLevel = rawConfig.logLevel as LogLevel | undefined;
+  const envLogLevel = process.env.LOG_LEVEL as LogLevel | undefined;
+  const logLevel = envLogLevel ?? configLogLevel ?? CONFIG_DEFAULTS.logLevel;
+  const validLogLevels: LogLevel[] = ["debug", "info", "warn", "error"];
+  if (!validLogLevels.includes(logLevel)) {
+    throw new Error(`Invalid logLevel: ${logLevel}. Must be one of: ${validLogLevels.join(", ")}`);
+  }
+
   // Validate pairs array
   const rawPairs = rawConfig.pairs;
   if (!Array.isArray(rawPairs) || rawPairs.length === 0) {
@@ -152,6 +162,7 @@ export function loadConfigFromFile(configPath: string): MultiCopyTradingConfig {
 
   return {
     environment,
+    logLevel,
     reconciliationIntervalMs:
       (rawConfig.reconciliationIntervalMs as number) ?? CONFIG_DEFAULTS.reconciliationIntervalMs,
     refreshAccountIntervalMs:

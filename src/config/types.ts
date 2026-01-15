@@ -7,6 +7,9 @@
 /** Hyperliquid network environment */
 export type HyperliquidEnvironment = "mainnet" | "testnet";
 
+/** Log level for controlling output verbosity */
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
 /**
  * Risk management parameters for a single copy trading pair.
  */
@@ -84,6 +87,16 @@ export interface MultiCopyTradingConfig {
   environment: HyperliquidEnvironment;
 
   /**
+   * Log level for controlling output verbosity.
+   * - "debug": Detailed diagnostic information (recommended for troubleshooting)
+   * - "info": General operational messages (default)
+   * - "warn": Warning messages only
+   * - "error": Error messages only
+   * @default "info"
+   */
+  logLevel: LogLevel;
+
+  /**
    * Interval in milliseconds for periodic full state reconciliation.
    * @default 60000
    */
@@ -116,6 +129,7 @@ export interface MultiCopyTradingConfig {
  */
 export const CONFIG_DEFAULTS = {
   environment: "mainnet" as HyperliquidEnvironment,
+  logLevel: "info" as LogLevel,
   reconciliationIntervalMs: 60_000,
   refreshAccountIntervalMs: 5_000,
   websocketAggregateFills: true,

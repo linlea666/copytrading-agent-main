@@ -1,12 +1,14 @@
 /**
  * Simple structured logger with level-based filtering.
  *
- * Log level can be controlled via the `LOG_LEVEL` environment variable.
- * Defaults to "info" if not set.
+ * Log level can be controlled via:
+ * 1. Configuration file (logLevel field in pairs.json)
+ * 2. LOG_LEVEL environment variable (overrides config file)
+ * 3. Programmatically via setLogLevel() function
  *
  * Levels (in order of verbosity):
- * - debug: Detailed diagnostic information
- * - info: General informational messages
+ * - debug: Detailed diagnostic information (recommended for troubleshooting)
+ * - info: General informational messages (default)
  * - warn: Warning messages for recoverable issues
  * - error: Error messages for failures
  */
@@ -25,9 +27,32 @@ const levelWeights: Record<LogLevel, number> = {
   error: 40,
 };
 
-// Load minimum log level from environment (default: "info")
-const envLevel = (process.env.LOG_LEVEL as LogLevel | undefined) ?? "info";
-const minWeight = levelWeights[envLevel] ?? levelWeights.info;
+// Current log level state (mutable, can be changed at runtime)
+let currentLogLevel: LogLevel = (process.env.LOG_LEVEL as LogLevel | undefined) ?? "info";
+let minWeight = levelWeights[currentLogLevel] ?? levelWeights.info;
+
+/**
+ * Sets the minimum log level for filtering.
+ * Call this early in application startup with the config file value.
+ *
+ * @param level - New minimum log level
+ */
+export function setLogLevel(level: LogLevel): void {
+  if (levelWeights[level] === undefined) {
+    // eslint-disable-next-line no-console
+    console.warn(`Invalid log level: ${level}, keeping current level: ${currentLogLevel}`);
+    return;
+  }
+  currentLogLevel = level;
+  minWeight = levelWeights[level];
+}
+
+/**
+ * Gets the current log level.
+ */
+export function getLogLevel(): LogLevel {
+  return currentLogLevel;
+}
 
 /**
  * Core logging function that filters by level and writes to console.

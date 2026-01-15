@@ -30,7 +30,7 @@ import { MarketMetadataService } from "./services/marketMetadata.js";
 import { TradeExecutor } from "./services/tradeExecutor.js";
 import { Reconciler } from "./services/reconciler.js";
 import { SubscriptionService } from "./services/subscriptions.js";
-import { logger } from "./utils/logger.js";
+import { logger, setLogLevel, getLogLevel } from "./utils/logger.js";
 
 /**
  * Determines if multi-pair mode should be used.
@@ -49,6 +49,11 @@ async function runMultiPairMode(): Promise<void> {
   logger.info("Loading multi-pair configuration", { configPath });
 
   const config = loadConfigFromFile(configPath);
+  
+  // Set log level from configuration (can be overridden by LOG_LEVEL env var)
+  setLogLevel(config.logLevel);
+  logger.info("Log level configured", { logLevel: getLogLevel() });
+  
   const enabledPairs = getEnabledPairs(config);
 
   if (enabledPairs.length === 0) {
@@ -58,6 +63,7 @@ async function runMultiPairMode(): Promise<void> {
 
   logger.info("Multi-pair mode initialized", {
     environment: config.environment,
+    logLevel: config.logLevel,
     totalPairs: config.pairs.length,
     enabledPairs: enabledPairs.length,
     pairIds: enabledPairs.map((p) => p.id),

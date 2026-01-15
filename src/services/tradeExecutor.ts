@@ -131,11 +131,27 @@ export class TradeExecutor {
 
       // CRITICAL: Fetch fresh follower state from exchange before calculating deltas
       // This prevents stale state causing "reduce only would increase position" errors
-      const followerState = await this.deps.infoClient.clearinghouseState({
+      const followerClearinghouse = await this.deps.infoClient.clearinghouseState({
         user: this.deps.followerAddress,
       });
-      this.deps.followerState.applyClearinghouseState(followerState);
-      this.log.debug("Refreshed follower state before sync");
+      this.deps.followerState.applyClearinghouseState(followerClearinghouse);
+      
+      // Log follower account status for debugging
+      const followerMetrics = this.deps.followerState.getMetrics();
+      this.log.debug("Follower account status", {
+        equity: "$" + followerMetrics.accountValueUsd.toFixed(2),
+        totalNotional: "$" + followerMetrics.totalNotionalUsd.toFixed(2),
+        marginUsed: "$" + followerMetrics.totalMarginUsedUsd.toFixed(2),
+        withdrawable: "$" + followerMetrics.withdrawableUsd.toFixed(2),
+        positions: this.deps.followerState.getPositions().size,
+      });
+      
+      // Warn if follower has very low or zero balance
+      if (followerMetrics.accountValueUsd < 10) {
+        this.log.warn("Follower account has very low balance, trades may fail", {
+          equity: "$" + followerMetrics.accountValueUsd.toFixed(2),
+        });
+      }
 
       // Compute leader's current leverage for each position
       const allTargets = this.deps.leaderState.computeTargets(this.deps.metadataService);
@@ -181,11 +197,32 @@ export class TradeExecutor {
       // Compute deltas between current and target positions (scales leverage by copyRatio)
       const deltas = this.deps.followerState.computeDeltas(targets, this.deps.risk);
 
+      // Log delta computation results for debugging
+      if (deltas.length > 0) {
+        this.log.debug("Computed position deltas", {
+          count: deltas.length,
+          deltas: deltas.map((d) => ({
+            coin: d.coin,
+            currentSize: (d.current?.size ?? 0).toFixed(6),
+            targetSize: d.targetSize.toFixed(6),
+            deltaSize: d.deltaSize.toFixed(6),
+            maxNotional: "$" + d.maxNotionalUsd.toFixed(2),
+          })),
+        });
+      }
+
       // Filter out dust deltas that are too small to trade
       const actionable = deltas.filter((delta) => Math.abs(delta.deltaSize) > MIN_ABS_DELTA);
 
       if (actionable.length === 0) {
-        this.log.debug("Follower already synchronized with leader");
+        // Log why no action is needed
+        if (targets.length === 0) {
+          this.log.debug("No copyable targets - leader has no positions or all are historical");
+        } else if (deltas.every((d) => Math.abs(d.deltaSize) <= MIN_ABS_DELTA)) {
+          this.log.debug("Follower already synchronized with leader");
+        } else {
+          this.log.debug("No actionable deltas after filtering");
+        }
         return;
       }
 

@@ -59,7 +59,21 @@ export class SubscriptionService {
         aggregateByTime: this.config.websocketAggregateFills,
       },
       (event) => {
-        this.log.debug("Received leader fills event", { count: event.fills.length });
+        // Log fill event details at INFO level for visibility
+        if (event.fills.length > 0) {
+          this.log.info("Received leader trade signal", {
+            fillCount: event.fills.length,
+            trades: event.fills.map((fill) => ({
+              coin: fill.coin,
+              side: fill.side,
+              size: fill.sz,
+              price: fill.px,
+              time: fill.time,
+            })),
+          });
+        } else {
+          this.log.debug("Received empty fills event");
+        }
 
         // Update leader state incrementally
         this.leaderState.handleFillEvent(event);
@@ -68,6 +82,8 @@ export class SubscriptionService {
         void this.onLeaderFill?.();
       },
     );
+    
+    this.log.info("WebSocket subscription established successfully");
 
     this.fillsSub = {
       unsubscribe: () => subscription.unsubscribe(),

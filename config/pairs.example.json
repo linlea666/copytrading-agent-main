@@ -1,5 +1,6 @@
 {
   "environment": "mainnet",
+  "logLevel": "info",
   "reconciliationIntervalMs": 60000,
   "refreshAccountIntervalMs": 5000,
   "websocketAggregateFills": true,
