@@ -195,6 +195,30 @@ export class CopyTradingInstance {
       // 2. Perform initial reconciliation to get current state
       await this.reconciler.reconcileOnce();
 
+      // Log account status after initial reconciliation
+      const leaderMetrics = this.leaderState.getMetrics();
+      const followerMetrics = this.followerState.getMetrics();
+      this.log.info("Account status after initial sync", {
+        leader: {
+          address: this.pairConfig.leaderAddress,
+          equity: "$" + leaderMetrics.accountValueUsd.toFixed(2),
+          positions: this.leaderState.getPositions().size,
+        },
+        follower: {
+          address: this.clients.followerTradingAddress,
+          equity: "$" + followerMetrics.accountValueUsd.toFixed(2),
+          positions: this.followerState.getPositions().size,
+        },
+      });
+
+      // Warn if follower has no balance
+      if (followerMetrics.accountValueUsd <= 0) {
+        this.log.error("CRITICAL: Follower account has ZERO balance! Cannot execute any trades.", {
+          followerAddress: this.clients.followerTradingAddress,
+          hint: "Please deposit USDC to this address on Hyperliquid",
+        });
+      }
+
       // 3. Initialize historical position tracker
       const historicalCoins = this.historyTracker.initialize(this.leaderState.getPositions());
 

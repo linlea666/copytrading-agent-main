@@ -291,6 +291,41 @@ export class TradeExecutor {
         return;
       }
 
+      // Log detailed copy trading decision for each delta
+      const leaderMetrics = this.deps.leaderState.getMetrics();
+      for (const delta of processedDeltas) {
+        const markPx = this.deps.metadataService.getMarkPrice(delta.coin) ?? 0;
+        const currentSize = delta.current?.size ?? 0;
+        const notionalUsd = Math.abs(delta.deltaSize) * markPx;
+        
+        // Determine action type
+        let actionType: string;
+        if (currentSize === 0 && delta.targetSize !== 0) {
+          actionType = delta.targetSize > 0 ? "🟢 开多仓" : "🔴 开空仓";
+        } else if (delta.targetSize === 0) {
+          actionType = "⬜ 平仓";
+        } else if (Math.sign(currentSize) === Math.sign(delta.targetSize)) {
+          actionType = Math.abs(delta.targetSize) > Math.abs(currentSize) 
+            ? (delta.targetSize > 0 ? "🟢 加多仓" : "🔴 加空仓")
+            : (delta.targetSize > 0 ? "🟡 减多仓" : "🟡 减空仓");
+        } else {
+          actionType = delta.targetSize > 0 ? "🔄 空转多" : "🔄 多转空";
+        }
+        
+        this.log.info("Copy trade decision", {
+          coin: delta.coin,
+          action: actionType,
+          leaderEquity: "$" + leaderMetrics.accountValueUsd.toFixed(2),
+          followerEquity: "$" + followerMetrics.accountValueUsd.toFixed(2),
+          followerAddress: this.deps.followerAddress,
+          currentSize: currentSize.toFixed(6),
+          targetSize: delta.targetSize.toFixed(6),
+          deltaSize: delta.deltaSize.toFixed(6),
+          notionalUsd: "$" + notionalUsd.toFixed(2),
+          markPrice: markPx,
+        });
+      }
+
       // Build orders for each actionable delta
       const orders = processedDeltas
         .map((delta) => this.buildOrder(delta))
@@ -309,9 +344,15 @@ export class TradeExecutor {
         return;
       }
 
-      this.log.info("Submitting follower sync orders", {
-        orders: orders.length,
-        coins: orders.map((o) => o.a),
+      this.log.info("Submitting orders to exchange", {
+        orderCount: orders.length,
+        details: orders.map((o) => ({
+          asset: o.a,
+          side: o.b ? "买入" : "卖出",
+          size: o.s,
+          price: o.p,
+          reduceOnly: o.r,
+        })),
       });
 
       // Submit all orders as a batch (no grouping)

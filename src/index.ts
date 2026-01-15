@@ -18,6 +18,8 @@
  */
 
 import { existsSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import * as dotenv from "dotenv";
 import { loadConfig } from "./config/index.js";
@@ -197,12 +199,37 @@ async function runSinglePairMode(): Promise<void> {
  */
 async function main() {
   try {
-    // Load environment variables from .env if present
-    dotenv.config();
+    // Get the directory of the current module (works with ES modules)
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+    
+    // Try multiple paths for .env file (handles different deployment scenarios)
+    const envPaths = [
+      resolve(process.cwd(), ".env"),           // Current working directory
+      resolve(__dirname, "..", ".env"),         // Project root (from dist/)
+      resolve(__dirname, "..", "..", ".env"),   // One more level up
+    ];
+    
+    let envLoaded = false;
+    for (const envPath of envPaths) {
+      if (existsSync(envPath)) {
+        dotenv.config({ path: envPath });
+        logger.info("Loaded environment variables", { path: envPath });
+        envLoaded = true;
+        break;
+      }
+    }
+    
+    if (!envLoaded) {
+      logger.warn("No .env file found, using system environment variables only", {
+        searchedPaths: envPaths,
+      });
+    }
 
     logger.info("Hyperliquid Copy Trading Agent starting", {
       version: "2.0.0",
       nodeVersion: process.version,
+      cwd: process.cwd(),
     });
 
     // Determine which mode to run
