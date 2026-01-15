@@ -166,6 +166,23 @@ export class TradeExecutor {
         });
       }
 
+      // CRITICAL FIX: First, check historical positions that leader may have closed
+      // This must happen BEFORE filtering targets, to clear historical markers
+      // for positions that leader has fully closed (size → 0)
+      if (this.deps.historyTracker) {
+        const historicalCoins = this.deps.historyTracker.getHistoricalCoins();
+        for (const coin of historicalCoins) {
+          // Check if leader still has this position
+          const leaderHasPosition = allTargets.some(t => t.coin === coin);
+          if (!leaderHasPosition) {
+            // Leader no longer has this position - it was closed!
+            // Call canCopy with size=0 to clear the historical marker
+            this.log.info(`Historical position closed by leader`, { coin });
+            this.deps.historyTracker.canCopy(coin, 0);
+          }
+        }
+      }
+
       // Filter out historical positions if tracker is available
       const targets = this.deps.historyTracker
         ? allTargets.filter((target) => {

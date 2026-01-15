@@ -31,8 +31,8 @@ export interface ClearedPosition {
   coin: string;
   /** Timestamp when cleared */
   clearedAt: string;
-  /** Reason for clearing: position closed or direction flipped */
-  reason: "closed" | "flipped";
+  /** Reason for clearing: position closed, direction flipped, or re-opened after close */
+  reason: "closed" | "flipped" | "reopened";
 }
 
 /**
@@ -220,12 +220,12 @@ export class StatePersistence {
 
   /**
    * Clears a position from historical tracking.
-   * Called when position is closed or direction flips.
+   * Called when position is closed, direction flips, or re-opened after close.
    *
    * @param coin - Trading pair symbol
    * @param reason - Why the position was cleared
    */
-  clearHistoricalPosition(coin: string, reason: "closed" | "flipped") {
+  clearHistoricalPosition(coin: string, reason: "closed" | "flipped" | "reopened") {
     const index = this.state.historicalPositions.findIndex((p) => p.coin === coin);
     if (index === -1) return;
 

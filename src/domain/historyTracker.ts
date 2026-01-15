@@ -8,6 +8,9 @@
  * - When a position direction flips (long→short), it becomes a new position
  *
  * This ensures followers don't copy into positions with different entry prices.
+ *
+ * Key fix: Tracks "last seen size" to detect position changes correctly
+ * even when debounce merges multiple fills into one sync.
  */
 
 import { logger, type Logger } from "../utils/logger.js";
@@ -21,6 +24,12 @@ export class HistoryPositionTracker {
   private readonly persistence: StatePersistence;
   private historicalCoins: Set<string>;
   private initialized = false;
+  
+  /**
+   * Tracks the last seen leader position size for each coin.
+   * Used to detect position changes (especially from 0 → non-zero for re-opening).
+   */
+  private lastSeenLeaderSize: Map<string, number> = new Map();
 
   /**
    * Creates a new tracker with persistence.
@@ -101,6 +110,11 @@ export class HistoryPositionTracker {
       }
     }
 
+    // Initialize lastSeenLeaderSize with current leader positions
+    for (const [coin, pos] of leaderPositions) {
+      this.lastSeenLeaderSize.set(coin, pos.size);
+    }
+
     this.initialized = true;
     const result = Array.from(this.historicalCoins);
 
@@ -120,7 +134,8 @@ export class HistoryPositionTracker {
    * 1. If coin is not in historical set → can copy (new position)
    * 2. If coin is historical and now size=0 → clear and return false (don't copy the close)
    * 3. If coin is historical and direction flipped → clear and return true (copy the flip)
-   * 4. Otherwise → cannot copy (historical position operation)
+   * 4. If coin WAS historical, was closed (lastSeen≈0), now re-opened → can copy (new position!)
+   * 5. Otherwise → cannot copy (historical position operation)
    *
    * @param coin - Trading pair symbol
    * @param leaderSize - Leader's current position size for this coin
@@ -132,21 +147,47 @@ export class HistoryPositionTracker {
       return false;
     }
 
+    const lastSize = this.lastSeenLeaderSize.get(coin) ?? 0;
+    const wasZero = Math.abs(lastSize) < 1e-9;
+    const isNowZero = Math.abs(leaderSize) < 1e-9;
+    const isNowNonZero = !isNowZero;
+    
+    // Always update lastSeenLeaderSize after getting the previous value
+    this.lastSeenLeaderSize.set(coin, leaderSize);
+
     // Case 1: Not in historical set = new position, can copy
     if (!this.historicalCoins.has(coin)) {
       return true;
     }
 
     // Case 2: Position closed (size → 0)
-    if (Math.abs(leaderSize) < 1e-9) {
-      this.log.debug(`Historical position closed`, { coin });
+    if (isNowZero) {
+      this.log.info(`Historical position closed`, { coin, lastSize });
       this.historicalCoins.delete(coin);
       this.persistence.clearHistoricalPosition(coin, "closed");
       // Don't copy this close, but future trades on this coin can be copied
       return false;
     }
 
-    // Case 3: Check for direction flip
+    // Case 3: Position re-opened after close (lastSize≈0, now non-zero, but was cleared from historical)
+    // This handles the debounce merge scenario: close + re-open happen in one sync
+    // The historical flag was removed (either by earlier canCopy call or initialize validation)
+    // but we need to re-check: if lastSize was 0, this is truly a new position
+    if (wasZero && isNowNonZero) {
+      // This shouldn't happen if historicalCoins still contains the coin,
+      // but let's handle it: last time we saw size=0, historical was cleared,
+      // now it's non-zero, so it's a fresh position
+      this.log.info(`Historical position re-opened after close, treating as new`, {
+        coin,
+        lastSize,
+        newSize: leaderSize,
+      });
+      this.historicalCoins.delete(coin);
+      this.persistence.clearHistoricalPosition(coin, "reopened");
+      return true;
+    }
+
+    // Case 4: Check for direction flip
     const persisted = this.persistence.getHistoricalPosition(coin);
     if (persisted) {
       const wasLong = persisted.direction === "long";
@@ -165,8 +206,8 @@ export class HistoryPositionTracker {
       }
     }
 
-    // Case 4: Historical position, same direction = don't copy
-    this.log.debug(`Skipping historical position operation`, { coin });
+    // Case 5: Historical position, same direction = don't copy
+    this.log.debug(`Skipping historical position operation`, { coin, leaderSize });
     return false;
   }
 
