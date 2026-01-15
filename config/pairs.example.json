@@ -1,0 +1,40 @@
+{
+  "environment": "mainnet",
+  "reconciliationIntervalMs": 60000,
+  "refreshAccountIntervalMs": 5000,
+  "websocketAggregateFills": true,
+  "stateDir": "./data/state",
+  "pairs": [
+    {
+      "id": "smart-whale-1",
+      "leaderAddress": "0x1234567890123456789012345678901234567890",
+      "followerPrivateKey": "${FOLLOWER_1_PRIVATE_KEY}",
+      "risk": {
+        "copyRatio": 1.0,
+        "maxLeverage": 10,
+        "maxNotionalUsd": 50000,
+        "maxSlippageBps": 25,
+        "inverse": false
+      },
+      "minOrderNotionalUsd": 15,
+      "syncDebounceMs": 300,
+      "enabled": true
+    },
+    {
+      "id": "smart-whale-2",
+      "leaderAddress": "0x0987654321098765432109876543210987654321",
+      "followerPrivateKey": "${FOLLOWER_2_PRIVATE_KEY}",
+      "followerVaultAddress": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+      "risk": {
+        "copyRatio": 0.5,
+        "maxLeverage": 5,
+        "maxNotionalUsd": 20000,
+        "maxSlippageBps": 30,
+        "inverse": false
+      },
+      "minOrderNotionalUsd": 12,
+      "syncDebounceMs": 500,
+      "enabled": false
+    }
+  ]
+}

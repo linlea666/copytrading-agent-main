@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+.env.*
+*.log
+*.tsbuildinfo
+.DS_Store
+!.env.example
+
+# Config files (keep examples)
+config/pairs.json
+!config/pairs.example.json
+
+# State persistence data
+data/state/*.json
+!data/state/.gitkeep
