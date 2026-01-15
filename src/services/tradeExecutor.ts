@@ -367,7 +367,17 @@ export class TradeExecutor {
             this.minOrderNotionalUsd * Math.min(1, fundRatio * 500)
           );
           
+          // Get leader's direction of change from target info
+          const leaderDeltaSize = target?.leaderDeltaSize ?? 0;
+          const leaderIsAdding = 
+            (leaderDeltaSize > 0 && (target?.leaderSize ?? 0) > 0) || // adding to long
+            (leaderDeltaSize < 0 && (target?.leaderSize ?? 0) < 0);   // adding to short
+          const leaderIsReducing = 
+            (leaderDeltaSize < 0 && (target?.leaderSize ?? 0) >= 0) || // reducing long
+            (leaderDeltaSize > 0 && (target?.leaderSize ?? 0) <= 0);   // reducing short
+          
           // Determine if this is opening/adding (same direction) or reducing/closing (opposite direction)
+          // Based on FOLLOWER's perspective
           const isOpeningOrAdding = 
             (delta.deltaSize > 0 && delta.targetSize > 0) || // buying to go/add long
             (delta.deltaSize < 0 && delta.targetSize < 0);   // selling to go/add short
@@ -380,6 +390,54 @@ export class TradeExecutor {
           const shouldForceDueToDeviation = 
             maxDeviationPercent > 0 && 
             deviationPercent > maxDeviationPercent;
+
+          // CRITICAL: When follower is "over-positioned" but leader is ADDING,
+          // follower should also ADD (not reduce) to follow leader's direction
+          if (isReducingOrClosing && leaderIsAdding && Math.abs(leaderDeltaSize) > 0.0001) {
+            // Follower would reduce to align, but leader is actually adding
+            // Follow the leader's direction instead - add position
+            const leaderAddNotional = Math.abs(leaderDeltaSize) * markPx;
+            const scaledAddSize = leaderDeltaSize * fundRatio * (this.deps.risk.copyRatio ?? 1);
+            const scaledAddNotional = Math.abs(scaledAddSize) * markPx;
+            
+            // If the add amount is too small, bump it up to minimum
+            if (scaledAddNotional < dynamicThreshold) {
+              const minAddSize = dynamicThreshold / markPx;
+              const adjustedAddSize = leaderDeltaSize > 0 ? minAddSize : -minAddSize;
+              
+              this.log.info(`🔄 Following leader's ADD direction (overriding reduce)`, {
+                coin: delta.coin,
+                reason: "跟单者超配但领航员在加仓，跟随加仓",
+                leaderDelta: leaderDeltaSize.toFixed(4),
+                leaderAddNotional: "$" + leaderAddNotional.toFixed(2),
+                scaledNotional: "$" + scaledAddNotional.toFixed(2),
+                adjustedNotional: "$" + dynamicThreshold.toFixed(2),
+                currentSize: currentSize.toFixed(6),
+                addSize: adjustedAddSize.toFixed(6),
+              });
+              
+              return {
+                ...delta,
+                deltaSize: adjustedAddSize,
+                targetSize: currentSize + adjustedAddSize,
+              };
+            } else {
+              this.log.info(`🔄 Following leader's ADD direction`, {
+                coin: delta.coin,
+                reason: "跟单者超配但领航员在加仓，跟随加仓",
+                leaderDelta: leaderDeltaSize.toFixed(4),
+                addNotional: "$" + scaledAddNotional.toFixed(2),
+                currentSize: currentSize.toFixed(6),
+                addSize: scaledAddSize.toFixed(6),
+              });
+              
+              return {
+                ...delta,
+                deltaSize: scaledAddSize,
+                targetSize: currentSize + scaledAddSize,
+              };
+            }
+          }
 
           // If notional is below minimum (using dynamic threshold)
           if (notional < dynamicThreshold && !shouldForceDueToDeviation) {
@@ -394,6 +452,7 @@ export class TradeExecutor {
                 maxDeviation: maxDeviationPercent + "%",
                 currentSize: currentSize.toFixed(6),
                 targetSize: delta.targetSize.toFixed(6),
+                leaderAction: leaderIsAdding ? "加仓中" : (leaderIsReducing ? "减仓中" : "无变化"),
               });
               return null;
             }

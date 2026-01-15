@@ -27,12 +27,17 @@ export interface TargetPosition {
   leaderLeverageSetting: number;
   /** Leader's leverage type: "cross" or "isolated" */
   leaderLeverageType: LeverageType;
+  /** Leader's position change since last check (positive = adding, negative = reducing) */
+  leaderDeltaSize: number;
 }
 
 /**
  * Manages leader account state and computes target positions for the follower.
  */
 export class LeaderState extends TraderStateStore {
+  /** Tracks previous position sizes to detect leader's direction of change */
+  private previousSizes: Map<string, number> = new Map();
+
   constructor() {
     super("leader");
   }
@@ -46,20 +51,26 @@ export class LeaderState extends TraderStateStore {
    * Uses CURRENT MARK PRICE for leverage calculations, not entry price.
    * This ensures leverage is based on current market value.
    *
+   * Also tracks leader's position changes to determine direction (adding vs reducing).
+   *
    * @param metadataService - Service providing current mark prices
-   * @returns Array of target positions with leader's leverage info
+   * @returns Array of target positions with leader's leverage info and delta
    */
   computeTargets(metadataService: MarketMetadataService): TargetPosition[] {
     const metrics = this.getMetrics();
     const leaderEquity = metrics.accountValueUsd;
     
-    return Array.from(this.getPositions().values()).map((position) => {
+    const targets = Array.from(this.getPositions().values()).map((position) => {
       // Use CURRENT mark price for leverage calculation
       const markPrice = metadataService.getMarkPrice(position.coin) ?? position.entryPrice;
       
       // Calculate leader's current leverage for this position
       const notionalUsd = Math.abs(position.size) * markPrice;
       const leaderLeverage = safeDivide(notionalUsd, leaderEquity, 0);
+      
+      // Calculate leader's position change since last check
+      const previousSize = this.previousSizes.get(position.coin) ?? 0;
+      const leaderDeltaSize = position.size - previousSize;
       
       return {
         coin: position.coin,
@@ -68,8 +79,24 @@ export class LeaderState extends TraderStateStore {
         markPrice,
         leaderLeverageSetting: position.leverage,
         leaderLeverageType: position.leverageType,
+        leaderDeltaSize,
       };
     });
+    
+    // Update previous sizes for next comparison
+    // Also handle closed positions (size became 0)
+    const currentCoins = new Set(targets.map(t => t.coin));
+    for (const [coin, prevSize] of this.previousSizes) {
+      if (!currentCoins.has(coin)) {
+        // Position was closed, record as delta toward 0
+        this.previousSizes.delete(coin);
+      }
+    }
+    for (const target of targets) {
+      this.previousSizes.set(target.coin, target.leaderSize);
+    }
+    
+    return targets;
   }
 
   /**
