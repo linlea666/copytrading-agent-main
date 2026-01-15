@@ -674,11 +674,14 @@ export class TradeExecutor {
 
     const sideIsBuy = delta.deltaSize > 0;
 
-    // Convert slippage from basis points to decimal (e.g., 25 bps = 0.0025)
-    const slippage = risk.maxSlippageBps / 10_000;
+    // For market orders, use a generous slippage for the limit price protection
+    // FrontendMarket will execute at market price, but needs a limit price as protection
+    // Use 3% slippage as protection (can be overridden by config if higher)
+    const configSlippage = risk.maxSlippageBps / 10_000;
+    const marketOrderSlippage = Math.max(configSlippage, 0.03); // At least 3%
 
     // Adjust price for slippage: higher for buys (worse fill), lower for sells
-    const priceMultiplier = sideIsBuy ? 1 + slippage : 1 - slippage;
+    const priceMultiplier = sideIsBuy ? 1 + marketOrderSlippage : 1 - marketOrderSlippage;
 
     // Clamp price to reasonable bounds (10% to 1000% of mark price)
     const price = clamp(markPrice * priceMultiplier, markPrice * 0.1, markPrice * 10);
@@ -707,16 +710,17 @@ export class TradeExecutor {
     // Round price to match mark price precision (Hyperliquid's tick size)
     const priceStr = roundToMarkPricePrecision(price, markPrice);
 
-    // Build Hyperliquid order object
+    // Build Hyperliquid order object using FrontendMarket (market order)
+    // FrontendMarket executes at market price, the limit price serves as protection
     return {
       a: metadata.assetId, // asset
       b: sideIsBuy, // is buy
-      p: priceStr, // price
+      p: priceStr, // price (protection limit)
       s: size.toFixed(metadata.sizeDecimals), // size
       r: reduceOnly, // reduce-only flag
       t: {
         limit: {
-          tif: "Ioc" as const, // Immediate-Or-Cancel
+          tif: "FrontendMarket" as const, // Market order (same as Hyperliquid UI)
         },
       },
       c: `0x${randomUUID().replace(/-/g, "").slice(0, 32)}`, // client order ID
