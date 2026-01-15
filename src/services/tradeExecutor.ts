@@ -189,31 +189,73 @@ export class TradeExecutor {
         return;
       }
 
-      // Pre-filter tiny notionals to avoid minimum $10 exchange rejection
-      const aboveMinNotional = actionable.filter((delta) => {
-        const markPx = this.deps.metadataService.getMarkPrice(delta.coin) ?? delta.current?.entryPrice;
-        if (!markPx || markPx <= 0) {
-          this.log.debug(`Skipping ${delta.coin} due to missing/invalid mark price`);
-          return false;
-        }
-        const notional = Math.abs(delta.deltaSize) * markPx;
-        if (notional < this.minOrderNotionalUsd) {
-          this.log.debug(`Skipping ${delta.coin} due to small notional`, {
-            notional: notional.toFixed(4),
-            threshold: this.minOrderNotionalUsd,
-          });
-          return false;
-        }
-        return true;
-      });
+      // Process deltas: adjust small notionals to meet minimum threshold
+      // For opening/adding positions: bump up to minimum if too small
+      // For reducing/closing positions: keep original size (no need to meet minimum)
+      const processedDeltas = actionable
+        .map((delta) => {
+          const markPx = this.deps.metadataService.getMarkPrice(delta.coin) ?? delta.current?.entryPrice;
+          if (!markPx || markPx <= 0) {
+            this.log.debug(`Skipping ${delta.coin} due to missing/invalid mark price`);
+            return null;
+          }
 
-      if (aboveMinNotional.length === 0) {
-        this.log.debug("No deltas above minimum notional threshold");
+          const notional = Math.abs(delta.deltaSize) * markPx;
+          const currentSize = delta.current?.size ?? 0;
+          
+          // Determine if this is opening/adding (same direction) or reducing/closing (opposite direction)
+          const isOpeningOrAdding = 
+            (delta.deltaSize > 0 && delta.targetSize > 0) || // buying to go/add long
+            (delta.deltaSize < 0 && delta.targetSize < 0);   // selling to go/add short
+          
+          const isReducingOrClosing = 
+            (currentSize > 0 && delta.deltaSize < 0) || // selling to reduce long
+            (currentSize < 0 && delta.deltaSize > 0);   // buying to reduce short
+
+          // If notional is below minimum
+          if (notional < this.minOrderNotionalUsd) {
+            // For reducing/closing: skip if too small (no need to force minimum)
+            if (isReducingOrClosing) {
+              this.log.debug(`Skipping small reduce/close for ${delta.coin}`, {
+                notional: notional.toFixed(4),
+                threshold: this.minOrderNotionalUsd,
+              });
+              return null;
+            }
+            
+            // For opening/adding: bump up to minimum notional
+            if (isOpeningOrAdding) {
+              const minSize = this.minOrderNotionalUsd / markPx;
+              const adjustedDeltaSize = delta.deltaSize > 0 ? minSize : -minSize;
+              const adjustedTargetSize = (delta.current?.size ?? 0) + adjustedDeltaSize;
+              
+              this.log.info(`Adjusting small order to meet minimum`, {
+                coin: delta.coin,
+                originalNotional: notional.toFixed(4),
+                adjustedNotional: this.minOrderNotionalUsd.toFixed(4),
+                originalDeltaSize: delta.deltaSize.toFixed(6),
+                adjustedDeltaSize: adjustedDeltaSize.toFixed(6),
+              });
+              
+              return {
+                ...delta,
+                deltaSize: adjustedDeltaSize,
+                targetSize: adjustedTargetSize,
+              };
+            }
+          }
+
+          return delta;
+        })
+        .filter((delta): delta is PositionDelta => delta !== null);
+
+      if (processedDeltas.length === 0) {
+        this.log.debug("No valid deltas after processing");
         return;
       }
 
       // Build orders for each actionable delta
-      const orders = aboveMinNotional
+      const orders = processedDeltas
         .map((delta) => this.buildOrder(delta))
         // Filter out orders that round to zero size (too small to trade)
         .filter((order) => {
