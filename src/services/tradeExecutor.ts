@@ -47,15 +47,15 @@ function getDecimalPlaces(value: number): number {
 function roundToMarkPricePrecision(price: number, markPrice: number): string {
   const decimals = getDecimalPlaces(markPrice);
   const rounded = Number(price.toFixed(decimals));
-
+  
   // Format with fixed decimals and strip trailing zeros if any
   let result = rounded.toFixed(decimals);
-
+  
   // Only strip trailing zeros after the decimal point, keep the number valid
   if (decimals > 0) {
     result = result.replace(/\.?0+$/, "");
   }
-
+  
   // Ensure we have at least one digit
   return result || "0";
 }
@@ -229,7 +229,7 @@ export class TradeExecutor {
 
       // Compute leader's current leverage for each position
       const allTargets = this.deps.leaderState.computeTargets(this.deps.metadataService);
-
+      
       if (allTargets.length > 0) {
         this.log.debug("Leader positions and leverage", {
           positions: allTargets.map((t) => ({
@@ -262,9 +262,10 @@ export class TradeExecutor {
         ? allTargets.filter((target) => {
             const canCopy = this.deps.historyTracker!.canCopy(target.coin, target.leaderSize);
             if (!canCopy) {
-              this.log.debug(`Skipping historical position`, {
+              this.log.info(`⏭️ Skipping historical position`, {
                 coin: target.coin,
-                size: target.leaderSize,
+                reason: "启动时已存在的历史仓位，不跟单",
+                leaderSize: target.leaderSize.toFixed(4),
               });
             }
             return canCopy;
@@ -306,13 +307,15 @@ export class TradeExecutor {
       const actionable = deltas.filter((delta) => Math.abs(delta.deltaSize) > MIN_ABS_DELTA);
 
       if (actionable.length === 0) {
-        // Log why no action is needed
+        // Log why no action is needed - use INFO level for visibility
         if (targets.length === 0) {
-          this.log.debug("No copyable targets - leader has no positions or all are historical");
+          this.log.info("✅ No action needed - leader has no positions or all are historical");
         } else if (deltas.every((d) => Math.abs(d.deltaSize) <= MIN_ABS_DELTA)) {
-          this.log.debug("Follower already synchronized with leader");
+          this.log.info("✅ Follower already synchronized with leader", {
+            positions: targets.map((t) => t.coin).join(", "),
+          });
         } else {
-          this.log.debug("No actionable deltas after filtering");
+          this.log.info("✅ No actionable deltas - positions within tolerance");
         }
         return;
       }
@@ -335,13 +338,13 @@ export class TradeExecutor {
       // For reducing/closing positions: check deviation before skipping
       const processedDeltas = actionable
         .map((delta) => {
-          const markPx = this.deps.metadataService.getMarkPrice(delta.coin) ?? delta.current?.entryPrice;
-          if (!markPx || markPx <= 0) {
-            this.log.debug(`Skipping ${delta.coin} due to missing/invalid mark price`);
+        const markPx = this.deps.metadataService.getMarkPrice(delta.coin) ?? delta.current?.entryPrice;
+        if (!markPx || markPx <= 0) {
+          this.log.debug(`Skipping ${delta.coin} due to missing/invalid mark price`);
             return null;
-          }
+        }
 
-          const notional = Math.abs(delta.deltaSize) * markPx;
+        const notional = Math.abs(delta.deltaSize) * markPx;
           const currentSize = delta.current?.size ?? 0;
           
           // Calculate position deviation percentage
@@ -382,11 +385,15 @@ export class TradeExecutor {
           if (notional < dynamicThreshold && !shouldForceDueToDeviation) {
             // For reducing/closing: skip if too small AND deviation is acceptable
             if (isReducingOrClosing) {
-              this.log.debug(`Skipping small reduce/close for ${delta.coin}`, {
-                notional: notional.toFixed(4),
-                threshold: dynamicThreshold.toFixed(2),
+              this.log.info(`⏭️ Skipping small reduce/close`, {
+                coin: delta.coin,
+                reason: "金额低于阈值，偏离度可接受",
+                notional: "$" + notional.toFixed(2),
+                threshold: "$" + dynamicThreshold.toFixed(2),
                 deviation: deviationPercent.toFixed(2) + "%",
                 maxDeviation: maxDeviationPercent + "%",
+                currentSize: currentSize.toFixed(6),
+                targetSize: delta.targetSize.toFixed(6),
               });
               return null;
             }
@@ -430,7 +437,9 @@ export class TradeExecutor {
         .filter((delta): delta is PositionDelta => delta !== null);
 
       if (processedDeltas.length === 0) {
-        this.log.debug("No valid deltas after processing");
+        this.log.info("✅ No orders to execute after processing", {
+          reason: "所有变化金额过小或已被跳过",
+        });
         return;
       }
 
@@ -505,12 +514,12 @@ export class TradeExecutor {
           }
           return true;
         });
-
+      
       if (orders.length === 0) {
         this.log.debug("No valid orders to submit after filtering");
         return;
       }
-
+      
       this.log.info("Submitting orders to exchange", {
         orderCount: orders.length,
         details: orders.map((o) => ({
@@ -528,12 +537,12 @@ export class TradeExecutor {
           orders,
           grouping: "na",
         });
-
+        
         // Log successful fills and any errors
         const statuses = response.response.data.statuses;
         const filled = statuses.filter((s) => "filled" in s || "resting" in s);
         const errors = statuses.filter((s) => "error" in s);
-
+        
         if (filled.length > 0) {
           this.log.info("Orders executed successfully", { count: filled.length });
         }

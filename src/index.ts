@@ -109,89 +109,89 @@ async function runMultiPairMode(): Promise<void> {
 async function runSinglePairMode(): Promise<void> {
   logger.info("Running in single-pair mode (legacy)");
 
-  // Load configuration from environment variables
-  const config = loadConfig();
+    // Load configuration from environment variables
+    const config = loadConfig();
 
-  // Initialize Hyperliquid API clients (HTTP + WebSocket)
-  const clients = createHyperliquidClients(config);
+    // Initialize Hyperliquid API clients (HTTP + WebSocket)
+    const clients = createHyperliquidClients(config);
 
-  // State stores for leader and follower positions
-  const leaderState = new LeaderState();
-  const followerState = new FollowerState();
+    // State stores for leader and follower positions
+    const leaderState = new LeaderState();
+    const followerState = new FollowerState();
 
-  // Service to fetch and cache market metadata (decimals, max leverage, etc.)
-  const metadataService = new MarketMetadataService(clients.infoClient, logger);
+    // Service to fetch and cache market metadata (decimals, max leverage, etc.)
+    const metadataService = new MarketMetadataService(clients.infoClient, logger);
 
-  // Core service that computes deltas and executes follower orders
-  const tradeExecutor = new TradeExecutor({
-    exchangeClient: clients.exchangeClient,
-    infoClient: clients.infoClient,
+    // Core service that computes deltas and executes follower orders
+    const tradeExecutor = new TradeExecutor({
+      exchangeClient: clients.exchangeClient,
+      infoClient: clients.infoClient,
     leaderAddress: config.leaderAddress as `0x${string}`,
-    followerAddress: clients.followerTradingAddress,
-    leaderState,
-    followerState,
-    metadataService,
-    risk: config.risk,
-    log: logger,
-  });
+      followerAddress: clients.followerTradingAddress,
+      leaderState,
+      followerState,
+      metadataService,
+      risk: config.risk,
+      log: logger,
+    });
 
-  // Periodic reconciliation service to sync full account state from Hyperliquid API
-  const reconciler = new Reconciler(
-    clients.infoClient,
-    config,
-    leaderState,
-    followerState,
-    clients.followerTradingAddress,
-    logger,
-  );
+    // Periodic reconciliation service to sync full account state from Hyperliquid API
+    const reconciler = new Reconciler(
+      clients.infoClient,
+      config,
+      leaderState,
+      followerState,
+      clients.followerTradingAddress,
+      logger,
+    );
 
-  // WebSocket subscription service for real-time leader fill updates
-  const subscriptions = new SubscriptionService(
-    clients.subscriptionClient,
-    config,
-    leaderState,
-    () => tradeExecutor.syncWithLeader(),
-    logger,
-  );
+    // WebSocket subscription service for real-time leader fill updates
+    const subscriptions = new SubscriptionService(
+      clients.subscriptionClient,
+      config,
+      leaderState,
+      () => tradeExecutor.syncWithLeader(),
+      logger,
+    );
 
-  // Start WebSocket subscriptions to leader fills
-  await subscriptions.start();
+    // Start WebSocket subscriptions to leader fills
+    await subscriptions.start();
 
-  // Perform initial reconciliation to sync state
-  await reconciler.reconcileOnce();
+    // Perform initial reconciliation to sync state
+    await reconciler.reconcileOnce();
 
-  // Start periodic reconciliation loop
-  reconciler.start();
+    // Start periodic reconciliation loop
+    reconciler.start();
 
-  /**
-   * Background polling loop to periodically sync follower with leader.
-   * This provides a fallback in case WebSocket events are missed.
-   */
-  const pollLoop = async () => {
-    while (true) {
-      await tradeExecutor.syncWithLeader().catch((error) => {
-        logger.error("Periodic sync failed", { error });
-      });
-      await delay(config.refreshAccountIntervalMs);
-    }
-  };
+    /**
+     * Background polling loop to periodically sync follower with leader.
+     * This provides a fallback in case WebSocket events are missed.
+     */
+    const pollLoop = async () => {
+      while (true) {
+        await tradeExecutor.syncWithLeader().catch((error) => {
+          logger.error("Periodic sync failed", { error });
+        });
+        await delay(config.refreshAccountIntervalMs);
+      }
+    };
 
-  void pollLoop();
+    void pollLoop();
 
-  /**
-   * Graceful shutdown handler for SIGINT/SIGTERM signals.
-   * Unsubscribes from WebSocket channels and closes connections cleanly.
-   */
-  const shutdown = async (signal: string) => {
-    logger.warn(`Received ${signal}, shutting down`);
-    await subscriptions.stop().catch((error) => logger.error("Failed to stop subscriptions cleanly", { error }));
-    reconciler.stop();
-    await clients.wsTransport.close().catch(() => undefined);
-    process.exit(0);
-  };
+    /**
+     * Graceful shutdown handler for SIGINT/SIGTERM signals.
+     * Unsubscribes from WebSocket channels and closes connections cleanly.
+     */
+    const shutdown = async (signal: string) => {
+      logger.warn(`Received ${signal}, shutting down`);
+      await subscriptions.stop().catch((error) => logger.error("Failed to stop subscriptions cleanly", { error }));
+      reconciler.stop();
+      await clients.wsTransport.close().catch(() => undefined);
+      process.exit(0);
+    };
 
-  process.on("SIGINT", () => void shutdown("SIGINT"));
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+    process.on("SIGINT", () => void shutdown("SIGINT"));
+    process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
 /**

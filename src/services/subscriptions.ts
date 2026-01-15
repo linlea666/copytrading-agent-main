@@ -12,6 +12,7 @@ import type * as hl from "@nktkas/hyperliquid";
 import type { CopyTradingConfig } from "../config/index.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { LeaderState } from "../domain/leaderState.js";
+import { formatTimestamp } from "../utils/math.js";
 
 /**
  * Handle for managing an active subscription.
@@ -65,10 +66,10 @@ export class SubscriptionService {
             fillCount: event.fills.length,
             trades: event.fills.map((fill) => ({
               coin: fill.coin,
-              side: fill.side,
+              side: fill.side === "B" ? "买入" : "卖出",
               size: fill.sz,
-              price: fill.px,
-              time: fill.time,
+              price: "$" + fill.px,
+              time: formatTimestamp(fill.time),
             })),
           });
         } else {

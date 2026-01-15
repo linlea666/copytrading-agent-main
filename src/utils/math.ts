@@ -64,3 +64,40 @@ export function safeDivide(numerator: number, denominator: number, fallback = 0)
   }
   return numerator / denominator;
 }
+
+/**
+ * Formats a Unix timestamp (milliseconds) to a human-readable string.
+ * 
+ * @param timestamp - Unix timestamp in milliseconds
+ * @returns Formatted time string like "16:35:37" or "16:35:37.123"
+ */
+export function formatTimestamp(timestamp: number, includeMs = false): string {
+  const date = new Date(timestamp);
+  const hours = date.getHours().toString().padStart(2, "0");
+  const minutes = date.getMinutes().toString().padStart(2, "0");
+  const seconds = date.getSeconds().toString().padStart(2, "0");
+  
+  if (includeMs) {
+    const ms = date.getMilliseconds().toString().padStart(3, "0");
+    return `${hours}:${minutes}:${seconds}.${ms}`;
+  }
+  return `${hours}:${minutes}:${seconds}`;
+}
+
+/**
+ * Formats a Unix timestamp to ISO date-time string in local timezone.
+ * 
+ * @param timestamp - Unix timestamp in milliseconds
+ * @returns Formatted string like "2026-01-15 16:35:37"
+ */
+export function formatDateTime(timestamp: number): string {
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = (date.getMonth() + 1).toString().padStart(2, "0");
+  const day = date.getDate().toString().padStart(2, "0");
+  const hours = date.getHours().toString().padStart(2, "0");
+  const minutes = date.getMinutes().toString().padStart(2, "0");
+  const seconds = date.getSeconds().toString().padStart(2, "0");
+  
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+}
