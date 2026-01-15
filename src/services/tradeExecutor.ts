@@ -391,8 +391,14 @@ export class TradeExecutor {
             maxDeviationPercent > 0 && 
             deviationPercent > maxDeviationPercent;
 
-          // CRITICAL: When follower is "over-positioned" but leader is ADDING,
-          // follower should also ADD (not reduce) to follow leader's direction
+          // CRITICAL: When follower is "over-positioned", check leader's direction
+          // to decide what to do:
+          // - Leader adding → follower also adds (follow direction)
+          // - Leader reducing → follower also reduces (follow direction)
+          // - Leader no change → follower maintains position (don't reduce)
+          
+          // Case 1: Leader is adding but follower would reduce to align
+          // → Follow leader's add direction instead
           if (isReducingOrClosing && leaderIsAdding && Math.abs(leaderDeltaSize) > 0.0001) {
             // Follower would reduce to align, but leader is actually adding
             // Follow the leader's direction instead - add position
@@ -439,9 +445,25 @@ export class TradeExecutor {
             }
           }
 
+          // Case 2: Leader has NO change but follower would reduce to align
+          // → Maintain current position, don't reduce (wait for explicit leader action)
+          const leaderHasNoChange = Math.abs(leaderDeltaSize) < 0.0001;
+          if (isReducingOrClosing && leaderHasNoChange && !shouldForceDueToDeviation) {
+            this.log.info(`⏸️ Maintaining position - leader has no change`, {
+              coin: delta.coin,
+              reason: "领航员无变化，跟单者维持现有仓位不减仓",
+              currentSize: currentSize.toFixed(6),
+              targetSize: delta.targetSize.toFixed(6),
+              wouldReduce: "$" + notional.toFixed(2),
+              deviation: deviationPercent.toFixed(2) + "%",
+            });
+            return null;
+          }
+
           // If notional is below minimum (using dynamic threshold)
           if (notional < dynamicThreshold && !shouldForceDueToDeviation) {
             // For reducing/closing: skip if too small AND deviation is acceptable
+            // Note: Only reaches here if leader IS reducing (leaderIsReducing = true)
             if (isReducingOrClosing) {
               this.log.info(`⏭️ Skipping small reduce/close`, {
                 coin: delta.coin,
