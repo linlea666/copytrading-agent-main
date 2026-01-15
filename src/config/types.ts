@@ -48,10 +48,24 @@ export interface CopyPairConfig {
   leaderAddress: `0x${string}`;
 
   /**
-   * Private key of the follower account (hex format with 0x prefix).
+   * Private key of the follower account or API wallet (hex format with 0x prefix).
    * Can use ${ENV_VAR_NAME} syntax for environment variable substitution.
+   * 
+   * If using an API wallet (proxy wallet), this should be the API wallet's private key,
+   * and followerAddress should be set to the main account address.
    */
   followerPrivateKey: `0x${string}`;
+
+  /**
+   * Main account address for the follower (used for querying state and submitting orders).
+   * 
+   * Required when using an API wallet (proxy wallet):
+   * - followerPrivateKey: API wallet's private key (for signing)
+   * - followerAddress: Main account address (for trading)
+   * 
+   * If not specified, the address will be derived from followerPrivateKey.
+   */
+  followerAddress?: `0x${string}`;
 
   /** Optional vault address if trading through a Hyperliquid vault */
   followerVaultAddress?: `0x${string}`;

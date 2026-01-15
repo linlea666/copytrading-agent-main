@@ -43,17 +43,26 @@ function createPairClients(
   sharedWsTransport: hl.WebSocketTransport,
   sharedHttpTransport: hl.HttpTransport,
 ): PairClients {
-  // Create viem account from private key
+  // Create viem account from private key (used for signing)
   const followerAccount = privateKeyToAccount(pairConfig.followerPrivateKey);
 
-  // Determine trading address (vault or wallet)
-  const followerTradingAddress = (pairConfig.followerVaultAddress ??
-    followerAccount.address) as `0x${string}`;
+  // Determine trading address:
+  // Priority: vaultAddress > followerAddress (main account for API wallet) > derived from private key
+  // 
+  // When using API wallet (proxy wallet):
+  // - followerPrivateKey: API wallet private key (for signing)
+  // - followerAddress: Main account address (for trading and querying state)
+  const followerTradingAddress = (
+    pairConfig.followerVaultAddress ??
+    pairConfig.followerAddress ??
+    followerAccount.address
+  ) as `0x${string}`;
 
   // Create Info client (read-only, shares HTTP transport)
   const infoClient = new hl.InfoClient({ transport: sharedHttpTransport });
 
   // Create Exchange client for this pair
+  // When using API wallet, we need to specify the main account address
   const exchangeClient = new hl.ExchangeClient({
     transport: sharedHttpTransport,
     wallet: followerAccount,

@@ -57,6 +57,15 @@ function normalizePairConfig(pair: Partial<CopyPairConfig>, index: number): Copy
     throw new Error(`Pair "${pair.id}": leaderAddress must be 42 characters`);
   }
 
+  // Validate follower address (main account address when using API wallet)
+  let followerAddress: `0x${string}` | undefined;
+  if (pair.followerAddress) {
+    followerAddress = pair.followerAddress.toLowerCase() as `0x${string}`;
+    if (followerAddress.length !== 42) {
+      throw new Error(`Pair "${pair.id}": followerAddress must be 42 characters`);
+    }
+  }
+
   let followerVaultAddress: `0x${string}` | undefined;
   if (pair.followerVaultAddress) {
     followerVaultAddress = pair.followerVaultAddress.toLowerCase() as `0x${string}`;
@@ -86,6 +95,7 @@ function normalizePairConfig(pair: Partial<CopyPairConfig>, index: number): Copy
     id: pair.id,
     leaderAddress,
     followerPrivateKey,
+    ...(followerAddress ? { followerAddress } : {}),
     ...(followerVaultAddress ? { followerVaultAddress } : {}),
     risk,
     minOrderNotionalUsd: pair.minOrderNotionalUsd ?? CONFIG_DEFAULTS.pair.minOrderNotionalUsd,

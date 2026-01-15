@@ -10,6 +10,7 @@
       "id": "smart-whale-1",
       "leaderAddress": "0x1234567890123456789012345678901234567890",
       "followerPrivateKey": "${FOLLOWER_1_PRIVATE_KEY}",
+      "followerAddress": "0xYOUR_MAIN_ACCOUNT_ADDRESS_HERE",
       "risk": {
         "copyRatio": 1.0,
         "maxLeverage": 10,
@@ -19,7 +20,8 @@
       },
       "minOrderNotionalUsd": 15,
       "syncDebounceMs": 300,
-      "enabled": true
+      "enabled": true,
+      "_comment": "使用API钱包时: followerPrivateKey=API钱包私钥, followerAddress=主账户地址"
     },
     {
       "id": "smart-whale-2",
@@ -35,7 +37,8 @@
       },
       "minOrderNotionalUsd": 12,
       "syncDebounceMs": 500,
-      "enabled": false
+      "enabled": false,
+      "_comment": "使用Vault时: followerVaultAddress=金库地址"
     }
   ]
 }
