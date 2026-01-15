@@ -80,6 +80,8 @@ export interface TradeExecutorDeps {
   exchangeClient: hl.ExchangeClient;
   /** Hyperliquid info client for fetching account state */
   infoClient: hl.InfoClient;
+  /** Leader address for fetching leader state */
+  leaderAddress: `0x${string}`;
   /** Follower trading address */
   followerAddress: `0x${string}`;
   /** Leader state store */
@@ -195,11 +197,17 @@ export class TradeExecutor {
       await this.deps.metadataService.ensureLoaded();
       await this.deps.metadataService.refreshMarkPrices();
 
-      // CRITICAL: Fetch fresh follower state from exchange before calculating deltas
-      // This prevents stale state causing "reduce only would increase position" errors
-      const followerClearinghouse = await this.deps.infoClient.clearinghouseState({
-        user: this.deps.followerAddress,
-      });
+      // CRITICAL: Fetch fresh state from exchange before calculating deltas
+      // This prevents stale state causing incorrect calculations
+      // Fetch both leader and follower state in parallel for efficiency
+      const [leaderClearinghouse, followerClearinghouse] = await Promise.all([
+        this.deps.infoClient.clearinghouseState({ user: this.deps.leaderAddress }),
+        this.deps.infoClient.clearinghouseState({ user: this.deps.followerAddress }),
+      ]);
+      
+      // Apply leader state to get accurate leverage settings
+      // WebSocket fills don't include leverage info, so we need full state
+      this.deps.leaderState.applyClearinghouseState(leaderClearinghouse);
       this.deps.followerState.applyClearinghouseState(followerClearinghouse);
       
       // Log follower account status for debugging

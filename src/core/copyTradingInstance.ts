@@ -89,6 +89,7 @@ export class CopyTradingInstance {
     this.tradeExecutor = new TradeExecutor({
       exchangeClient: clients.exchangeClient,
       infoClient: clients.infoClient,
+      leaderAddress: pairConfig.leaderAddress,
       followerAddress: clients.followerTradingAddress,
       leaderState: this.leaderState,
       followerState: this.followerState,

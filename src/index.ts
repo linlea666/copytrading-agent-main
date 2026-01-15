@@ -126,6 +126,7 @@ async function runSinglePairMode(): Promise<void> {
   const tradeExecutor = new TradeExecutor({
     exchangeClient: clients.exchangeClient,
     infoClient: clients.infoClient,
+    leaderAddress: config.leaderAddress as `0x${string}`,
     followerAddress: clients.followerTradingAddress,
     leaderState,
     followerState,
