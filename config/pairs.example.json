@@ -16,29 +16,32 @@
         "maxLeverage": 10,
         "maxNotionalUsd": 50000,
         "maxSlippageBps": 25,
-        "inverse": false
+        "inverse": false,
+        "maxPositionDeviationPercent": 5
       },
       "minOrderNotionalUsd": 15,
       "syncDebounceMs": 300,
       "enabled": true,
-      "_comment": "使用API钱包时: followerPrivateKey=API钱包私钥, followerAddress=主账户地址"
+      "_comment_1": "使用API钱包时: followerPrivateKey=API钱包私钥, followerAddress=主账户地址",
+      "_comment_2": "maxPositionDeviationPercent: 仓位偏离度超过此值时强制同步(防止大户跟单小户时仓位偏离过大)"
     },
     {
-      "id": "smart-whale-2",
+      "id": "big-whale",
       "leaderAddress": "0x0987654321098765432109876543210987654321",
       "followerPrivateKey": "${FOLLOWER_2_PRIVATE_KEY}",
-      "followerVaultAddress": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+      "followerAddress": "0xYOUR_MAIN_ACCOUNT_ADDRESS_HERE",
       "risk": {
-        "copyRatio": 0.5,
-        "maxLeverage": 5,
-        "maxNotionalUsd": 20000,
+        "copyRatio": 1.0,
+        "maxLeverage": 50,
+        "maxNotionalUsd": 100000,
         "maxSlippageBps": 30,
-        "inverse": false
+        "inverse": false,
+        "maxPositionDeviationPercent": 3
       },
       "minOrderNotionalUsd": 12,
       "syncDebounceMs": 500,
       "enabled": false,
-      "_comment": "使用Vault时: followerVaultAddress=金库地址"
+      "_comment": "跟单大户时建议降低偏离度阈值(如3%)，确保仓位更紧密同步"
     }
   ]
 }

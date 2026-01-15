@@ -317,9 +317,22 @@ export class TradeExecutor {
         return;
       }
 
+      // Get equity values for deviation calculation
+      const leaderEquity = this.deps.leaderState.getMetrics().accountValueUsd;
+      const followerEquityForDeviation = followerMetrics.accountValueUsd;
+      
+      // Get max deviation threshold from config (default 5%)
+      const maxDeviationPercent = 
+        ("maxPositionDeviationPercent" in this.deps.risk 
+          ? this.deps.risk.maxPositionDeviationPercent 
+          : 5) ?? 5;
+      
+      // Calculate fund ratio for dynamic threshold
+      const fundRatio = followerEquityForDeviation / leaderEquity;
+      
       // Process deltas: adjust small notionals to meet minimum threshold
       // For opening/adding positions: bump up to minimum if too small
-      // For reducing/closing positions: keep original size (no need to meet minimum)
+      // For reducing/closing positions: check deviation before skipping
       const processedDeltas = actionable
         .map((delta) => {
           const markPx = this.deps.metadataService.getMarkPrice(delta.coin) ?? delta.current?.entryPrice;
@@ -331,6 +344,26 @@ export class TradeExecutor {
           const notional = Math.abs(delta.deltaSize) * markPx;
           const currentSize = delta.current?.size ?? 0;
           
+          // Calculate position deviation percentage
+          // Leader's position ratio = |leaderSize * price| / leaderEquity
+          // Follower's position ratio = |currentSize * price| / followerEquity
+          const target = targets.find((t) => t.coin === delta.coin);
+          const leaderPositionRatio = target 
+            ? (Math.abs(target.leaderSize) * markPx) / leaderEquity 
+            : 0;
+          const followerPositionRatio = followerEquityForDeviation > 0 
+            ? (Math.abs(currentSize) * markPx) / followerEquityForDeviation 
+            : 0;
+          const deviationPercent = Math.abs(leaderPositionRatio - followerPositionRatio) * 100;
+          
+          // Calculate dynamic threshold based on fund ratio
+          // When fund ratio is very small (big leader, small follower), lower the threshold
+          // Minimum is $10 (Hyperliquid's minimum order value)
+          const dynamicThreshold = Math.max(
+            10,
+            this.minOrderNotionalUsd * Math.min(1, fundRatio * 500)
+          );
+          
           // Determine if this is opening/adding (same direction) or reducing/closing (opposite direction)
           const isOpeningOrAdding = 
             (delta.deltaSize > 0 && delta.targetSize > 0) || // buying to go/add long
@@ -340,27 +373,34 @@ export class TradeExecutor {
             (currentSize > 0 && delta.deltaSize < 0) || // selling to reduce long
             (currentSize < 0 && delta.deltaSize > 0);   // buying to reduce short
 
-          // If notional is below minimum
-          if (notional < this.minOrderNotionalUsd) {
-            // For reducing/closing: skip if too small (no need to force minimum)
+          // Check if we should force sync due to high deviation
+          const shouldForceDueToDeviation = 
+            maxDeviationPercent > 0 && 
+            deviationPercent > maxDeviationPercent;
+
+          // If notional is below minimum (using dynamic threshold)
+          if (notional < dynamicThreshold && !shouldForceDueToDeviation) {
+            // For reducing/closing: skip if too small AND deviation is acceptable
             if (isReducingOrClosing) {
               this.log.debug(`Skipping small reduce/close for ${delta.coin}`, {
                 notional: notional.toFixed(4),
-                threshold: this.minOrderNotionalUsd,
+                threshold: dynamicThreshold.toFixed(2),
+                deviation: deviationPercent.toFixed(2) + "%",
+                maxDeviation: maxDeviationPercent + "%",
               });
               return null;
             }
             
             // For opening/adding: bump up to minimum notional
             if (isOpeningOrAdding) {
-              const minSize = this.minOrderNotionalUsd / markPx;
+              const minSize = dynamicThreshold / markPx;
               const adjustedDeltaSize = delta.deltaSize > 0 ? minSize : -minSize;
               const adjustedTargetSize = (delta.current?.size ?? 0) + adjustedDeltaSize;
               
               this.log.info(`Adjusting small order to meet minimum`, {
                 coin: delta.coin,
                 originalNotional: notional.toFixed(4),
-                adjustedNotional: this.minOrderNotionalUsd.toFixed(4),
+                adjustedNotional: dynamicThreshold.toFixed(4),
                 originalDeltaSize: delta.deltaSize.toFixed(6),
                 adjustedDeltaSize: adjustedDeltaSize.toFixed(6),
               });
@@ -371,6 +411,18 @@ export class TradeExecutor {
                 targetSize: adjustedTargetSize,
               };
             }
+          }
+          
+          // Force sync due to high deviation - log this important event
+          if (shouldForceDueToDeviation && notional < this.minOrderNotionalUsd) {
+            this.log.info(`Forcing sync due to high position deviation`, {
+              coin: delta.coin,
+              notional: notional.toFixed(4),
+              deviation: deviationPercent.toFixed(2) + "%",
+              maxDeviation: maxDeviationPercent + "%",
+              leaderRatio: (leaderPositionRatio * 100).toFixed(2) + "%",
+              followerRatio: (followerPositionRatio * 100).toFixed(2) + "%",
+            });
           }
 
           return delta;

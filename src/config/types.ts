@@ -35,6 +35,23 @@ export interface PairRiskConfig {
 
   /** When true, invert leader direction (long→short, short→long) */
   inverse: boolean;
+
+  /**
+   * Maximum allowed position deviation percentage between leader and follower.
+   * 
+   * When the difference in position ratio (position_value / account_equity) between
+   * leader and follower exceeds this threshold, sync will be forced regardless of
+   * minimum order notional. This prevents position drift when leader has much larger
+   * account than follower.
+   * 
+   * Example: If set to 5, and leader has 10% of equity in BTC but follower has only 3%,
+   * the 7% deviation exceeds the 5% threshold, forcing a sync even if the order
+   * notional is below minOrderNotionalUsd.
+   * 
+   * Set to 0 to disable deviation-based forced sync.
+   * @default 5 (5%)
+   */
+  maxPositionDeviationPercent?: number;
 }
 
 /**
@@ -158,6 +175,7 @@ export const CONFIG_DEFAULTS = {
       maxNotionalUsd: 250_000,
       maxSlippageBps: 25,
       inverse: false,
+      maxPositionDeviationPercent: 5,
     },
   },
 } as const;
