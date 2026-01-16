@@ -205,13 +205,43 @@ export class SignalProcessor {
   }
 
   /**
+   * Check if a fill is a spot trade (not perps).
+   * Spot coins have @ prefix like @142, @107
+   * Spot directions are "Buy" or "Sell" instead of "Open Long" etc.
+   */
+  private isSpotTrade(fill: RawFill): boolean {
+    // Check coin format: spot coins have @ prefix
+    if (fill.coin.startsWith("@")) {
+      return true;
+    }
+    // Check direction: spot trades use "Buy"/"Sell"
+    const perpDirections = ["Open Long", "Close Long", "Open Short", "Close Short"];
+    if (!perpDirections.includes(fill.dir)) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Aggregate multiple fills into single entries by oid.
    * Same order may be filled in multiple partial trades.
+   * Filters out spot trades (only processes perps).
    */
   private aggregateFills(fills: RawFill[]): AggregatedFill[] {
     const byOid = new Map<number, AggregatedFill>();
 
     for (const fill of fills) {
+      // Skip spot trades - only copy perps (contracts)
+      if (this.isSpotTrade(fill)) {
+        this.log.debug("Skipping spot trade", {
+          coin: fill.coin,
+          dir: fill.dir,
+          reason: "现货交易，只跟单合约",
+        });
+        this.tradeLogger?.logTradeSkipped(fill.coin, "现货交易，只跟单合约");
+        continue;
+      }
+
       const size = parseFloat(fill.sz);
       const price = parseFloat(fill.px);
       const startPos = parseFloat(fill.startPosition);
