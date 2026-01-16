@@ -141,6 +141,10 @@ async function runSinglePairMode(): Promise<void> {
     metadataService,
     risk: config.risk,
     log: logger,
+    // Trade logging configuration
+    pairId: "legacy",
+    logDir: "./data/state",
+    enableTradeLog: true,
   });
 
   // Periodic reconciliation service to sync full account state from Hyperliquid API

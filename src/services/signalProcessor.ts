@@ -17,6 +17,7 @@ import type { UserFillsEvent } from "@nktkas/hyperliquid/api/subscription";
 import type { PairRiskConfig } from "../config/types.js";
 import type { RiskConfig } from "../config/index.js";
 import { logger, type Logger } from "../utils/logger.js";
+import { TradeLogger } from "../utils/tradeLogger.js";
 import type { TradingSignal, TradingDirection, CopyAction } from "../domain/types.js";
 import type { HistoryPositionTracker } from "../domain/historyTracker.js";
 import type { MarketMetadataService } from "./marketMetadata.js";
@@ -111,6 +112,12 @@ export interface SignalProcessorDeps {
   syncLeverage?: boolean;
   /** Logger instance */
   log?: Logger;
+  /** Pair ID for logging */
+  pairId?: string;
+  /** Log directory for trade logs */
+  logDir?: string;
+  /** Whether to enable trade logging to files */
+  enableTradeLog?: boolean;
 }
 
 /**
@@ -121,6 +128,7 @@ export class SignalProcessor {
   private readonly log: Logger;
   private readonly minOrderNotionalUsd: number;
   private readonly syncLeverage: boolean;
+  private readonly tradeLogger: TradeLogger | null;
   private processing = false;
 
   /** Cache of leverage settings already synced */
@@ -130,6 +138,22 @@ export class SignalProcessor {
     this.log = deps.log ?? logger;
     this.minOrderNotionalUsd = deps.minOrderNotionalUsd ?? DEFAULT_MIN_ORDER_NOTIONAL_USD;
     this.syncLeverage = deps.syncLeverage ?? true;
+
+    // Initialize trade logger if enabled
+    if (deps.enableTradeLog && deps.logDir) {
+      this.tradeLogger = new TradeLogger(
+        {
+          logDir: deps.logDir,
+          pairId: deps.pairId ?? "default",
+          leaderAddress: deps.leaderAddress,
+          followerAddress: deps.followerAddress,
+          enabled: true,
+        },
+        this.log,
+      );
+    } else {
+      this.tradeLogger = null;
+    }
   }
 
   /**
@@ -242,11 +266,14 @@ export class SignalProcessor {
       if (this.deps.historyTracker) {
         const canCopy = this.deps.historyTracker.canCopy(agg.coin, agg.endPosition);
         if (!canCopy) {
+          const reason = isFullClose ? "历史仓位平仓，清除标记" : "历史仓位操作，不跟单";
           this.log.info("Skipping historical position operation", {
             coin: agg.coin,
             direction: agg.direction,
-            reason: isFullClose ? "历史仓位平仓，清除标记" : "历史仓位操作，不跟单",
+            reason,
           });
+          // Log to trade file
+          this.tradeLogger?.logTradeSkipped(agg.coin, reason);
           continue;
         }
       }
@@ -277,13 +304,21 @@ export class SignalProcessor {
     const leaderEquity = this.deps.leaderState.getMetrics().accountValueUsd;
     const followerEquity = this.deps.followerState.getMetrics().accountValueUsd;
 
+    // Update trade logger with current equity
+    this.tradeLogger?.updateEquity(leaderEquity, followerEquity);
+
+    // Log received signal to file
+    this.tradeLogger?.logSignal(signal);
+
     if (leaderEquity <= 0) {
       this.log.warn("Leader equity is zero or negative, skipping", { leaderEquity });
+      this.tradeLogger?.logTradeSkipped(signal.coin, "领航员资产为零或负数");
       return;
     }
 
     if (followerEquity <= 0) {
       this.log.warn("Follower equity is zero or negative, skipping", { followerEquity });
+      this.tradeLogger?.logTradeSkipped(signal.coin, "跟单者资产为零或负数");
       return;
     }
 
@@ -316,6 +351,10 @@ export class SignalProcessor {
         threshold: "$" + this.minOrderNotionalUsd.toFixed(2),
         reason: "金额低于最小阈值",
       });
+      this.tradeLogger?.logTradeSkipped(
+        signal.coin,
+        `金额低于最小阈值 ($${notional.toFixed(2)} < $${this.minOrderNotionalUsd})`,
+      );
       return;
     }
 
@@ -323,6 +362,7 @@ export class SignalProcessor {
     const action = this.determineAction(signal, followerSize);
     if (!action) {
       this.log.debug("No action determined for signal", { signal });
+      this.tradeLogger?.logTradeSkipped(signal.coin, "无法确定交易动作");
       return;
     }
 
@@ -459,22 +499,30 @@ export class SignalProcessor {
 
       if (filled.length > 0) {
         this.log.info("✅ Order executed successfully", { coin: action.coin });
+        // Log success to trade log
+        this.tradeLogger?.logTradeSuccess(action);
       }
       if (errors.length > 0) {
+        const errorMsg = errors.map((e) => ("error" in e ? e.error : "unknown")).join(", ");
         this.log.warn("❌ Order failed", {
           coin: action.coin,
           errors: errors.map((e) => ("error" in e ? e.error : "unknown")),
         });
+        // Log failure to trade log
+        this.tradeLogger?.logTradeFailed(action, errorMsg);
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       if (errorMessage.includes("Insufficient margin")) {
         this.log.warn("Order failed: insufficient margin", { coin: action.coin });
+        this.tradeLogger?.logTradeFailed(action, "保证金不足");
       } else {
         this.log.error("Order execution failed", {
           coin: action.coin,
           error: errorMessage,
         });
+        this.tradeLogger?.logTradeFailed(action, errorMessage);
+        this.tradeLogger?.logError("订单执行异常", error instanceof Error ? error : undefined);
       }
     }
   }

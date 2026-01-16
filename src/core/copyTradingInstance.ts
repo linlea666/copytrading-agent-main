@@ -98,6 +98,10 @@ export class CopyTradingInstance {
       historyTracker: this.historyTracker,
       syncLeverage: true,
       log: this.log,
+      // Trade logging configuration
+      pairId: pairConfig.id,
+      logDir: globalConfig.stateDir,
+      enableTradeLog: globalConfig.enableTradeLog ?? true,
     });
 
     // Initialize WebSocket subscription service

@@ -151,6 +151,13 @@ export interface MultiCopyTradingConfig {
    */
   stateDir: string;
 
+  /**
+   * Whether to enable trade logging to files.
+   * When enabled, trade logs will be saved to stateDir/trades/{leaderAddress}/{date}.jsonl
+   * @default true
+   */
+  enableTradeLog?: boolean;
+
   /** List of copy trading pairs */
   pairs: CopyPairConfig[];
 }
@@ -165,6 +172,7 @@ export const CONFIG_DEFAULTS = {
   refreshAccountIntervalMs: 5_000,
   websocketAggregateFills: true,
   stateDir: "./data/state",
+  enableTradeLog: true,
   pair: {
     minOrderNotionalUsd: 15,
     syncDebounceMs: 300,
