@@ -68,9 +68,25 @@ export class SubscriptionService {
           return;
         }
 
+        // CRITICAL: Skip snapshot data (historical fills)
+        // When subscribing, the server first sends historical data with isSnapshot=true
+        // We must ignore these to avoid replaying historical trades!
+        if (event.isSnapshot) {
+          const oldestFill = event.fills[event.fills.length - 1];
+          const newestFill = event.fills[0];
+          this.log.info("⏭️ Skipping historical snapshot data", {
+            fillCount: event.fills.length,
+            reason: "历史快照数据，不是实时信号",
+            oldestFill: oldestFill ? formatTimestamp(oldestFill.time) : "N/A",
+            newestFill: newestFill ? formatTimestamp(newestFill.time) : "N/A",
+          });
+          return;
+        }
+
         // Log fill event details at INFO level for visibility
         this.log.info("📥 Received leader trade signal", {
           fillCount: event.fills.length,
+          isSnapshot: false,
           trades: event.fills.map((fill) => ({
             coin: fill.coin,
             direction: fill.dir,
