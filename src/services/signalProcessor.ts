@@ -215,7 +215,15 @@ export class SignalProcessor {
       return true;
     }
     // Check direction: spot trades use "Buy"/"Sell"
-    const perpDirections = ["Open Long", "Close Long", "Open Short", "Close Short"];
+    // Perps use: "Open Long", "Close Long", "Open Short", "Close Short", "Long > Short", "Short > Long"
+    const perpDirections = [
+      "Open Long",
+      "Close Long",
+      "Open Short",
+      "Close Short",
+      "Long > Short",   // 反向开仓：多转空
+      "Short > Long",   // 反向开仓：空转多
+    ];
     if (!perpDirections.includes(fill.dir)) {
       return true;
     }
@@ -451,6 +459,22 @@ export class SignalProcessor {
         description = signal.isFullClose ? "⬜ 平空仓" : "🟡 减空仓";
         break;
 
+      // 反向开仓：多转空 (卖出平多 + 开空)
+      case "Long > Short":
+        action = "sell";
+        // 不设 reduceOnly，允许反向开仓
+        // 计算实际需要的卖出数量 = 平掉多仓 + 开空仓
+        description = "🔄 反向：多转空";
+        break;
+
+      // 反向开仓：空转多 (买入平空 + 开多)
+      case "Short > Long":
+        action = "buy";
+        // 不设 reduceOnly，允许反向开仓
+        // 计算实际需要的买入数量 = 平掉空仓 + 开多仓
+        description = "🔄 反向：空转多";
+        break;
+
       default:
         this.log.warn("Unknown direction", { direction });
         return null;
@@ -572,6 +596,10 @@ export class SignalProcessor {
         return isFullClose ? "平多仓" : "减多仓";
       case "Close Short":
         return isFullClose ? "平空仓" : "减空仓";
+      case "Long > Short":
+        return "反向：多转空";
+      case "Short > Long":
+        return "反向：空转多";
       default:
         return direction;
     }

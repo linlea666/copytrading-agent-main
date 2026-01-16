@@ -7,12 +7,15 @@ export type PositionSide = "long" | "short" | "flat";
 
 /**
  * Trading direction from Hyperliquid fill's `dir` field.
+ * Includes position flip directions (Long > Short, Short > Long).
  */
 export type TradingDirection =
   | "Open Long"
   | "Close Long"
   | "Open Short"
-  | "Close Short";
+  | "Close Short"
+  | "Long > Short"   // 反向：多转空
+  | "Short > Long";  // 反向：空转多
 
 /**
  * Parsed and aggregated trading signal from leader's fills.

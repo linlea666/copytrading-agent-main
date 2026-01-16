@@ -136,6 +136,8 @@ function translateDirection(dir: string): string {
     "Close Long": "平多仓",
     "Open Short": "开空仓",
     "Close Short": "平空仓",
+    "Long > Short": "反向：多转空",
+    "Short > Long": "反向：空转多",
   };
   return map[dir] || dir;
 }
