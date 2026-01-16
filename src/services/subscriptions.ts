@@ -2,16 +2,18 @@
  * WebSocket subscription service for real-time leader fill events.
  *
  * Subscribes to the leader's fill stream on Hyperliquid and:
+ * - Passes fill events to SignalProcessor for copy trading
  * - Updates leader state incrementally with each fill
- * - Triggers follower sync callback when fills occur
  *
- * This provides low-latency replication compared to polling.
+ * This is the single source of trading signals.
+ * All copy trades are triggered by WebSocket fill events.
  */
 
 import type * as hl from "@nktkas/hyperliquid";
 import type { CopyTradingConfig } from "../config/index.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { LeaderState } from "../domain/leaderState.js";
+import { SignalProcessor } from "./signalProcessor.js";
 import { formatTimestamp } from "../utils/math.js";
 
 /**
@@ -31,14 +33,14 @@ export class SubscriptionService {
    * @param subscriptionClient - Hyperliquid WebSocket subscription client
    * @param config - Copy trading configuration
    * @param leaderState - Leader state store to update
-   * @param onLeaderFill - Optional callback to trigger on each fill event
+   * @param signalProcessor - Signal processor for executing copy trades
    * @param log - Logger instance
    */
   constructor(
     private readonly subscriptionClient: hl.SubscriptionClient,
     private readonly config: CopyTradingConfig,
     private readonly leaderState: LeaderState,
-    private readonly onLeaderFill?: () => void | Promise<void>,
+    private readonly signalProcessor: SignalProcessor,
     private readonly log: Logger = logger,
   ) {}
 
@@ -59,31 +61,42 @@ export class SubscriptionService {
         user: this.config.leaderAddress as `0x${string}`,
         aggregateByTime: this.config.websocketAggregateFills,
       },
-      (event) => {
-        // Log fill event details at INFO level for visibility
-        if (event.fills.length > 0) {
-          this.log.info("Received leader trade signal", {
-            fillCount: event.fills.length,
-            trades: event.fills.map((fill) => ({
-              coin: fill.coin,
-              side: fill.side === "B" ? "买入" : "卖出",
-              size: fill.sz,
-              price: "$" + fill.px,
-              time: formatTimestamp(fill.time),
-            })),
-          });
-        } else {
+      async (event) => {
+        // Skip empty events
+        if (event.fills.length === 0) {
           this.log.debug("Received empty fills event");
+          return;
         }
+
+        // Log fill event details at INFO level for visibility
+        this.log.info("📥 Received leader trade signal", {
+          fillCount: event.fills.length,
+          trades: event.fills.map((fill) => ({
+            coin: fill.coin,
+            direction: fill.dir,
+            side: fill.side === "B" ? "买入" : "卖出",
+            size: fill.sz,
+            price: "$" + fill.px,
+            startPosition: fill.startPosition,
+            time: formatTimestamp(fill.time),
+          })),
+        });
 
         // Update leader state incrementally
         this.leaderState.handleFillEvent(event);
 
-        // Trigger sync callback (e.g., to execute follower orders)
-        void this.onLeaderFill?.();
+        // Process signals through SignalProcessor
+        // This is the single source of truth for copy trading
+        try {
+          await this.signalProcessor.processFillEvent(event);
+        } catch (error) {
+          this.log.error("Failed to process fill event", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
       },
     );
-    
+
     this.log.info("WebSocket subscription established successfully");
 
     this.fillsSub = {

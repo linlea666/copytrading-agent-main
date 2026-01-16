@@ -5,22 +5,24 @@
  * - State management (leader & follower)
  * - Historical position tracking
  * - WebSocket subscriptions
- * - Trade execution
- * - Periodic reconciliation
- * - Debounced sync management
+ * - Signal processing and trade execution
+ * - Periodic state reconciliation
+ *
+ * Trading Flow (simplified):
+ * 1. WebSocket receives leader's fill events
+ * 2. SignalProcessor processes fills and executes copy trades
+ * 3. Reconciler periodically syncs state (no trading)
  */
 
-import { setTimeout as delay } from "node:timers/promises";
 import type * as hl from "@nktkas/hyperliquid";
 import type { CopyPairConfig, MultiCopyTradingConfig } from "../config/types.js";
 import { LeaderState } from "../domain/leaderState.js";
 import { FollowerState } from "../domain/followerState.js";
 import { HistoryPositionTracker } from "../domain/historyTracker.js";
 import { MarketMetadataService } from "../services/marketMetadata.js";
-import { TradeExecutor } from "../services/tradeExecutor.js";
+import { SignalProcessor } from "../services/signalProcessor.js";
 import { SubscriptionService } from "../services/subscriptions.js";
 import { Reconciler } from "../services/reconciler.js";
-import { DebouncedSyncManager } from "../services/debouncedSync.js";
 import { createInstanceLogger } from "../utils/instanceLogger.js";
 import { logger, type Logger } from "../utils/logger.js";
 
@@ -46,15 +48,12 @@ export class CopyTradingInstance {
   private readonly leaderState: LeaderState;
   private readonly followerState: FollowerState;
   private readonly historyTracker: HistoryPositionTracker;
-  private readonly tradeExecutor: TradeExecutor;
+  private readonly signalProcessor: SignalProcessor;
   private readonly subscriptions: SubscriptionService;
   private readonly reconciler: Reconciler;
-  private readonly debouncedSync: DebouncedSyncManager;
   private readonly log: Logger;
 
   private status: InstanceStatus = "created";
-  private pollLoopRunning = false;
-  private pollLoopAbort: AbortController | null = null;
 
   /**
    * Creates a new copy trading instance.
@@ -85,11 +84,11 @@ export class CopyTradingInstance {
       this.log,
     );
 
-    // Initialize trade executor with history tracking
-    this.tradeExecutor = new TradeExecutor({
+    // Initialize signal processor (core trading logic)
+    this.signalProcessor = new SignalProcessor({
       exchangeClient: clients.exchangeClient,
       infoClient: clients.infoClient,
-      leaderAddress: pairConfig.leaderAddress,
+      leaderAddress: pairConfig.leaderAddress as `0x${string}`,
       followerAddress: clients.followerTradingAddress,
       leaderState: this.leaderState,
       followerState: this.followerState,
@@ -97,38 +96,31 @@ export class CopyTradingInstance {
       risk: pairConfig.risk,
       minOrderNotionalUsd: pairConfig.minOrderNotionalUsd,
       historyTracker: this.historyTracker,
+      syncLeverage: true,
       log: this.log,
     });
 
-    // Initialize debounced sync manager
-    this.debouncedSync = new DebouncedSyncManager(
-      () => this.tradeExecutor.syncWithLeader(),
-      pairConfig.syncDebounceMs,
-      this.log,
-    );
-
     // Initialize WebSocket subscription service
-    // Note: We create a compatible config object for the existing SubscriptionService
     const subscriptionConfig = {
       leaderAddress: pairConfig.leaderAddress,
       websocketAggregateFills: globalConfig.websocketAggregateFills,
     };
     this.subscriptions = new SubscriptionService(
       clients.subscriptionClient,
-      subscriptionConfig as any, // Type compatibility with existing service
+      subscriptionConfig as any,
       this.leaderState,
-      () => this.debouncedSync.requestSync(),
+      this.signalProcessor,
       this.log,
     );
 
-    // Initialize reconciler
+    // Initialize reconciler (state sync only, no trading)
     const reconcilerConfig = {
       leaderAddress: pairConfig.leaderAddress,
       reconciliationIntervalMs: globalConfig.reconciliationIntervalMs,
     };
     this.reconciler = new Reconciler(
       clients.infoClient,
-      reconcilerConfig as any, // Type compatibility with existing service
+      reconcilerConfig as any,
       this.leaderState,
       this.followerState,
       clients.followerTradingAddress,
@@ -168,11 +160,11 @@ export class CopyTradingInstance {
    * Starts the copy trading instance.
    *
    * Startup sequence:
-   * 1. Perform initial reconciliation to get current state
-   * 2. Initialize historical position tracker
-   * 3. Start WebSocket subscriptions
-   * 4. Start periodic reconciliation
-   * 5. Start background poll loop
+   * 1. Ensure market metadata is loaded
+   * 2. Perform initial reconciliation to get current state
+   * 3. Initialize historical position tracker
+   * 4. Start WebSocket subscriptions (this triggers copy trading)
+   * 5. Start periodic state reconciliation (no trading)
    */
   async start(): Promise<void> {
     if (this.status === "running") {
@@ -186,7 +178,6 @@ export class CopyTradingInstance {
       follower: this.clients.followerTradingAddress,
       copyRatio: this.pairConfig.risk.copyRatio,
       minOrderNotionalUsd: this.pairConfig.minOrderNotionalUsd,
-      syncDebounceMs: this.pairConfig.syncDebounceMs,
     });
 
     try {
@@ -233,16 +224,15 @@ export class CopyTradingInstance {
       }
 
       // 4. Start WebSocket subscriptions
+      // This is where copy trading happens - fills trigger SignalProcessor
       await this.subscriptions.start();
 
-      // 5. Start periodic reconciliation
+      // 5. Start periodic state reconciliation (no trading, just state sync)
       this.reconciler.start();
 
-      // 6. Start background poll loop
-      this.startPollLoop();
-
       this.status = "running";
-      this.log.info("Copy trading instance started successfully");
+      this.log.info("✅ Copy trading instance started successfully");
+      this.log.info("📡 Listening for leader trades via WebSocket...");
     } catch (error) {
       this.status = "error";
       this.log.error("Failed to start copy trading instance", {
@@ -264,12 +254,6 @@ export class CopyTradingInstance {
     this.log.info("Stopping copy trading instance");
 
     try {
-      // Stop poll loop
-      this.stopPollLoop();
-
-      // Stop debounced sync (cancel pending)
-      this.debouncedSync.stop();
-
       // Stop WebSocket subscriptions
       await this.subscriptions.stop().catch((error) => {
         this.log.error("Error stopping subscriptions", { error });
@@ -289,13 +273,6 @@ export class CopyTradingInstance {
       });
       this.status = "error";
     }
-  }
-
-  /**
-   * Triggers an immediate sync (bypasses debounce).
-   */
-  async syncNow(): Promise<void> {
-    await this.debouncedSync.syncNow();
   }
 
   /**
@@ -320,45 +297,10 @@ export class CopyTradingInstance {
   }
 
   /**
-   * Starts the background poll loop.
+   * Manually triggers a state reconciliation.
+   * NOTE: This only syncs state, it does NOT trigger trades.
    */
-  private startPollLoop() {
-    if (this.pollLoopRunning) return;
-
-    this.pollLoopRunning = true;
-    this.pollLoopAbort = new AbortController();
-
-    const runLoop = async () => {
-      while (this.pollLoopRunning) {
-        try {
-          await this.tradeExecutor.syncWithLeader();
-        } catch (error) {
-          this.log.error("Periodic sync failed", {
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-
-        // Wait for next iteration
-        try {
-          await delay(this.globalConfig.refreshAccountIntervalMs, undefined, {
-            signal: this.pollLoopAbort?.signal,
-          });
-        } catch {
-          // Aborted, exit loop
-          break;
-        }
-      }
-    };
-
-    void runLoop();
-  }
-
-  /**
-   * Stops the background poll loop.
-   */
-  private stopPollLoop() {
-    this.pollLoopRunning = false;
-    this.pollLoopAbort?.abort();
-    this.pollLoopAbort = null;
+  async refreshState(): Promise<void> {
+    await this.reconciler.reconcileOnce();
   }
 }

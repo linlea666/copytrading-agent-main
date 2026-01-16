@@ -7,10 +7,16 @@
  *
  * Key features:
  * - Multi-pair support: Multiple leader-follower pairs in a single process
- * - Proportional copy trading: Copy based on leader's leverage ratio
+ * - Signal-based copy trading: Directly follows leader's WebSocket fill events
+ * - Accurate direction detection: Uses fill's `dir` field for trade type
+ * - Order aggregation: Aggregates multiple fills by order ID for efficiency
  * - Historical position tracking: Don't copy pre-existing positions
- * - Debounced sync: Handle rapid fills efficiently
  * - State persistence: Survive restarts gracefully
+ *
+ * Trading flow:
+ * 1. WebSocket receives leader's fill events
+ * 2. SignalProcessor parses direction, aggregates by order ID
+ * 3. Copy trade executed with proportional sizing
  *
  * Usage modes:
  * 1. Multi-pair mode: Set CONFIG_PATH env var or use config/pairs.json
@@ -20,7 +26,6 @@
 import { existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { setTimeout as delay } from "node:timers/promises";
 import * as dotenv from "dotenv";
 import { loadConfig } from "./config/index.js";
 import { loadConfigFromFile, getDefaultConfigPath, getEnabledPairs } from "./config/loader.js";
@@ -29,7 +34,7 @@ import { createHyperliquidClients } from "./clients/hyperliquid.js";
 import { LeaderState } from "./domain/leaderState.js";
 import { FollowerState } from "./domain/followerState.js";
 import { MarketMetadataService } from "./services/marketMetadata.js";
-import { TradeExecutor } from "./services/tradeExecutor.js";
+import { SignalProcessor } from "./services/signalProcessor.js";
 import { Reconciler } from "./services/reconciler.js";
 import { SubscriptionService } from "./services/subscriptions.js";
 import { logger, setLogLevel, getLogLevel } from "./utils/logger.js";
@@ -109,89 +114,83 @@ async function runMultiPairMode(): Promise<void> {
 async function runSinglePairMode(): Promise<void> {
   logger.info("Running in single-pair mode (legacy)");
 
-    // Load configuration from environment variables
-    const config = loadConfig();
+  // Load configuration from environment variables
+  const config = loadConfig();
 
-    // Initialize Hyperliquid API clients (HTTP + WebSocket)
-    const clients = createHyperliquidClients(config);
+  // Initialize Hyperliquid API clients (HTTP + WebSocket)
+  const clients = createHyperliquidClients(config);
 
-    // State stores for leader and follower positions
-    const leaderState = new LeaderState();
-    const followerState = new FollowerState();
+  // State stores for leader and follower positions
+  const leaderState = new LeaderState();
+  const followerState = new FollowerState();
 
-    // Service to fetch and cache market metadata (decimals, max leverage, etc.)
-    const metadataService = new MarketMetadataService(clients.infoClient, logger);
+  // Service to fetch and cache market metadata (decimals, max leverage, etc.)
+  const metadataService = new MarketMetadataService(clients.infoClient, logger);
 
-    // Core service that computes deltas and executes follower orders
-    const tradeExecutor = new TradeExecutor({
-      exchangeClient: clients.exchangeClient,
-      infoClient: clients.infoClient,
+  // Ensure metadata is loaded before creating signal processor
+  await metadataService.ensureLoaded();
+
+  // Signal processor for handling leader fills and executing copy trades
+  const signalProcessor = new SignalProcessor({
+    exchangeClient: clients.exchangeClient,
+    infoClient: clients.infoClient,
     leaderAddress: config.leaderAddress as `0x${string}`,
-      followerAddress: clients.followerTradingAddress,
-      leaderState,
-      followerState,
-      metadataService,
-      risk: config.risk,
-      log: logger,
-    });
+    followerAddress: clients.followerTradingAddress,
+    leaderState,
+    followerState,
+    metadataService,
+    risk: config.risk,
+    log: logger,
+  });
 
-    // Periodic reconciliation service to sync full account state from Hyperliquid API
-    const reconciler = new Reconciler(
-      clients.infoClient,
-      config,
-      leaderState,
-      followerState,
-      clients.followerTradingAddress,
-      logger,
-    );
+  // Periodic reconciliation service to sync full account state from Hyperliquid API
+  // NOTE: Only syncs state, does NOT trigger trades
+  const reconciler = new Reconciler(
+    clients.infoClient,
+    config,
+    leaderState,
+    followerState,
+    clients.followerTradingAddress,
+    logger,
+  );
 
-    // WebSocket subscription service for real-time leader fill updates
-    const subscriptions = new SubscriptionService(
-      clients.subscriptionClient,
-      config,
-      leaderState,
-      () => tradeExecutor.syncWithLeader(),
-      logger,
-    );
+  // WebSocket subscription service for real-time leader fill updates
+  // Trading is driven by WebSocket fills via SignalProcessor
+  const subscriptions = new SubscriptionService(
+    clients.subscriptionClient,
+    config,
+    leaderState,
+    signalProcessor,
+    logger,
+  );
 
-    // Start WebSocket subscriptions to leader fills
-    await subscriptions.start();
+  // Perform initial reconciliation to sync state
+  await reconciler.reconcileOnce();
 
-    // Perform initial reconciliation to sync state
-    await reconciler.reconcileOnce();
+  // Start WebSocket subscriptions to leader fills
+  // This is the single source of trading signals
+  await subscriptions.start();
 
-    // Start periodic reconciliation loop
-    reconciler.start();
+  // Start periodic reconciliation loop (state sync only, no trading)
+  reconciler.start();
 
-    /**
-     * Background polling loop to periodically sync follower with leader.
-     * This provides a fallback in case WebSocket events are missed.
-     */
-    const pollLoop = async () => {
-      while (true) {
-        await tradeExecutor.syncWithLeader().catch((error) => {
-          logger.error("Periodic sync failed", { error });
-        });
-        await delay(config.refreshAccountIntervalMs);
-      }
-    };
+  logger.info("✅ Single-pair mode started successfully");
+  logger.info("📡 Listening for leader trades via WebSocket...");
 
-    void pollLoop();
+  /**
+   * Graceful shutdown handler for SIGINT/SIGTERM signals.
+   * Unsubscribes from WebSocket channels and closes connections cleanly.
+   */
+  const shutdown = async (signal: string) => {
+    logger.warn(`Received ${signal}, shutting down`);
+    await subscriptions.stop().catch((error) => logger.error("Failed to stop subscriptions cleanly", { error }));
+    reconciler.stop();
+    await clients.wsTransport.close().catch(() => undefined);
+    process.exit(0);
+  };
 
-    /**
-     * Graceful shutdown handler for SIGINT/SIGTERM signals.
-     * Unsubscribes from WebSocket channels and closes connections cleanly.
-     */
-    const shutdown = async (signal: string) => {
-      logger.warn(`Received ${signal}, shutting down`);
-      await subscriptions.stop().catch((error) => logger.error("Failed to stop subscriptions cleanly", { error }));
-      reconciler.stop();
-      await clients.wsTransport.close().catch(() => undefined);
-      process.exit(0);
-    };
-
-    process.on("SIGINT", () => void shutdown("SIGINT"));
-    process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
 /**

@@ -2,10 +2,16 @@
  * Reconciliation service for periodically syncing state from Hyperliquid API.
  *
  * Fetches full account snapshots for both leader and follower to ensure
- * in-memory state matches the exchange. This provides a fallback in case
- * WebSocket events are missed or state drifts.
+ * in-memory state matches the exchange.
  *
- * Runs on a configurable interval (default: 60 seconds).
+ * NOTE: This service only syncs state, it does NOT trigger trades.
+ * All trading is driven by WebSocket fill events via SignalProcessor.
+ *
+ * Purposes:
+ * - Startup initialization
+ * - State display and logging
+ * - Recovery after WebSocket disconnection
+ * - Periodic state verification (backup mechanism)
  */
 
 import type * as hl from "@nktkas/hyperliquid";
@@ -14,8 +20,12 @@ import { logger, type Logger } from "../utils/logger.js";
 import { LeaderState } from "../domain/leaderState.js";
 import { FollowerState } from "../domain/followerState.js";
 
+/** Default reconciliation interval: 5 minutes (reduced from 1 minute) */
+const DEFAULT_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000;
+
 /**
  * Manages periodic reconciliation of leader and follower states.
+ * NOTE: Only syncs state, does NOT trigger trades.
  */
 export class Reconciler {
   private intervalHandle: NodeJS.Timeout | null = null;
@@ -34,6 +44,7 @@ export class Reconciler {
    * for both leader and follower from the API.
    *
    * Fetches happen in parallel for efficiency.
+   * NOTE: This only updates state, it does NOT trigger trades.
    */
   async reconcileOnce() {
     const [leader, follower] = await Promise.all([
@@ -43,34 +54,57 @@ export class Reconciler {
 
     this.leaderState.applyClearinghouseState(leader);
     this.followerState.applyClearinghouseState(follower);
-    this.log.debug("Reconciled leader/follower states");
+
+    // Log state summary for monitoring
+    const leaderPositions = this.leaderState.getPositions();
+    const followerPositions = this.followerState.getPositions();
+
+    this.log.debug("State reconciliation completed", {
+      leader: {
+        equity: "$" + this.leaderState.getMetrics().accountValueUsd.toFixed(2),
+        positions: leaderPositions.size,
+        coins: Array.from(leaderPositions.keys()),
+      },
+      follower: {
+        equity: "$" + this.followerState.getMetrics().accountValueUsd.toFixed(2),
+        positions: followerPositions.size,
+        coins: Array.from(followerPositions.keys()),
+      },
+    });
   }
 
   /**
    * Starts the periodic reconciliation loop.
    * No-op if already running.
+   *
+   * NOTE: This only syncs state periodically.
+   * Trading is driven by WebSocket events, not by reconciliation.
    */
   start() {
     if (this.intervalHandle) {
       return;
     }
 
-    this.log.info("Starting reconciler loop", {
-      intervalMs: this.config.reconciliationIntervalMs,
+    // Use configured interval or default to 5 minutes
+    const intervalMs = this.config.reconciliationIntervalMs ?? DEFAULT_RECONCILIATION_INTERVAL_MS;
+
+    this.log.info("Starting reconciler (state sync only, no trading)", {
+      intervalMs,
+      intervalMinutes: (intervalMs / 60000).toFixed(1),
     });
 
     const tick = async () => {
       try {
         await this.reconcileOnce();
       } catch (error) {
-        this.log.error("Reconciliation loop error", { error });
+        this.log.error("Reconciliation error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     };
 
-    // Run immediately on start
-    void tick();
-    // Schedule periodic ticks
-    this.intervalHandle = setInterval(tick, this.config.reconciliationIntervalMs);
+    // Schedule periodic ticks (don't run immediately, startup handles initial state)
+    this.intervalHandle = setInterval(tick, intervalMs);
   }
 
   /**
@@ -81,6 +115,7 @@ export class Reconciler {
     if (!this.intervalHandle) {
       return;
     }
+    this.log.info("Stopping reconciler");
     clearInterval(this.intervalHandle);
     this.intervalHandle = null;
   }

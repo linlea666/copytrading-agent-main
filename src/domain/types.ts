@@ -5,6 +5,61 @@
 /** Direction of a position */
 export type PositionSide = "long" | "short" | "flat";
 
+/**
+ * Trading direction from Hyperliquid fill's `dir` field.
+ */
+export type TradingDirection =
+  | "Open Long"
+  | "Close Long"
+  | "Open Short"
+  | "Close Short";
+
+/**
+ * Parsed and aggregated trading signal from leader's fills.
+ */
+export interface TradingSignal {
+  /** Trading pair (e.g., "BTC", "ETH") */
+  coin: string;
+  /** Trading direction from fill's dir field */
+  direction: TradingDirection;
+  /** Total size (aggregated if multiple fills for same oid) */
+  size: number;
+  /** Average price (weighted if aggregated) */
+  price: number;
+  /** Order ID for aggregation */
+  orderId: number;
+  /** Position size before execution */
+  startPosition: number;
+  /** Position size after execution */
+  endPosition: number;
+  /** Timestamp of the fill */
+  timestamp: number;
+  /** Whether this was a taker order (crossed the spread) */
+  crossed: boolean;
+  /** Whether this is a new position (startPosition was 0) */
+  isNewPosition: boolean;
+  /** Whether this fully closes the position (endPosition is 0) */
+  isFullClose: boolean;
+}
+
+/**
+ * Result of processing a trading signal.
+ */
+export interface CopyAction {
+  /** Trading pair */
+  coin: string;
+  /** Action to execute: buy or sell */
+  action: "buy" | "sell";
+  /** Size to trade */
+  size: number;
+  /** Reference price for slippage calculation */
+  price: number;
+  /** Whether this should be reduce-only */
+  reduceOnly: boolean;
+  /** Human-readable description of the action */
+  description: string;
+}
+
 /** Leverage mode type */
 export type LeverageType = "cross" | "isolated";
 
