@@ -442,9 +442,14 @@ export class SignalProcessor {
       case "Close Long":
         action = "sell";
         reduceOnly = true;
-        // Don't sell more than we have
         if (currentFollowerSize > 0) {
-          actualSize = Math.min(followerSize, currentFollowerSize);
+          // 如果领航员完全平仓，跟单者也应该完全平仓
+          // 避免因比例计算误差导致残留仓位
+          if (signal.isFullClose) {
+            actualSize = currentFollowerSize;
+          } else {
+            actualSize = Math.min(followerSize, currentFollowerSize);
+          }
         }
         description = signal.isFullClose ? "⬜ 平多仓" : "🟡 减多仓";
         break;
@@ -452,9 +457,14 @@ export class SignalProcessor {
       case "Close Short":
         action = "buy";
         reduceOnly = true;
-        // Don't buy more than needed to close
         if (currentFollowerSize < 0) {
-          actualSize = Math.min(followerSize, Math.abs(currentFollowerSize));
+          // 如果领航员完全平仓，跟单者也应该完全平仓
+          // 避免因比例计算误差导致残留仓位
+          if (signal.isFullClose) {
+            actualSize = Math.abs(currentFollowerSize);
+          } else {
+            actualSize = Math.min(followerSize, Math.abs(currentFollowerSize));
+          }
         }
         description = signal.isFullClose ? "⬜ 平空仓" : "🟡 减空仓";
         break;
