@@ -465,31 +465,42 @@ export class SignalProcessor {
       case "Close Long":
         action = "sell";
         reduceOnly = true;
-        if (currentFollowerSize > 0) {
-          // 如果领航员完全平仓，跟单者也应该完全平仓
-          // 避免因比例计算误差导致残留仓位
-          if (signal.isFullClose) {
-            actualSize = currentFollowerSize;
-          } else {
-            actualSize = Math.min(followerSize, currentFollowerSize);
-          }
+        // 方案 2：跟单者没有多仓，跳过
+        if (currentFollowerSize <= 0) {
+          this.log.debug("No long position to reduce, skipping", { coin, currentFollowerSize });
+          return null;
         }
-        description = signal.isFullClose ? "⬜ 平多仓" : "🟡 减多仓";
+        // 方案 A：减仓金额不足时直接平全部
+        const longReduceSize = Math.min(followerSize, currentFollowerSize);
+        const longReduceNotional = longReduceSize * price;
+        if (signal.isFullClose || longReduceNotional < this.minOrderNotionalUsd) {
+          actualSize = currentFollowerSize;
+          description = signal.isFullClose ? "⬜ 平多仓" : "⬜ 平多仓(减仓金额不足)";
+        } else {
+          actualSize = longReduceSize;
+          description = "🟡 减多仓";
+        }
         break;
 
       case "Close Short":
         action = "buy";
         reduceOnly = true;
-        if (currentFollowerSize < 0) {
-          // 如果领航员完全平仓，跟单者也应该完全平仓
-          // 避免因比例计算误差导致残留仓位
-          if (signal.isFullClose) {
-            actualSize = Math.abs(currentFollowerSize);
-          } else {
-            actualSize = Math.min(followerSize, Math.abs(currentFollowerSize));
-          }
+        // 方案 2：跟单者没有空仓，跳过
+        if (currentFollowerSize >= 0) {
+          this.log.debug("No short position to reduce, skipping", { coin, currentFollowerSize });
+          return null;
         }
-        description = signal.isFullClose ? "⬜ 平空仓" : "🟡 减空仓";
+        // 方案 A：减仓金额不足时直接平全部
+        const absFollowerSize = Math.abs(currentFollowerSize);
+        const shortReduceSize = Math.min(followerSize, absFollowerSize);
+        const shortReduceNotional = shortReduceSize * price;
+        if (signal.isFullClose || shortReduceNotional < this.minOrderNotionalUsd) {
+          actualSize = absFollowerSize;
+          description = signal.isFullClose ? "⬜ 平空仓" : "⬜ 平空仓(减仓金额不足)";
+        } else {
+          actualSize = shortReduceSize;
+          description = "🟡 减空仓";
+        }
         break;
 
       // 反向开仓：多转空 (卖出平多 + 开空)
