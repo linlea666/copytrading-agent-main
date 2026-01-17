@@ -465,41 +465,67 @@ export class SignalProcessor {
       case "Close Long":
         action = "sell";
         reduceOnly = true;
-        // 方案 2：跟单者没有多仓，跳过
+        // 跟单者没有多仓，跳过
         if (currentFollowerSize <= 0) {
           this.log.debug("No long position to reduce, skipping", { coin, currentFollowerSize });
           return null;
         }
-        // 方案 A：减仓金额不足时直接平全部
+        // 计算减仓相关数值
         const longReduceSize = Math.min(followerSize, currentFollowerSize);
         const longReduceNotional = longReduceSize * price;
-        if (signal.isFullClose || longReduceNotional < this.minOrderNotionalUsd) {
+        const longPositionNotional = currentFollowerSize * price;  // 跟单者全部仓位价值
+        const longBoostTarget = this.minOrderNotionalUsd + 1;  // $11 安全余量
+
+        if (signal.isFullClose) {
+          // 领航员完全平仓 → 跟单者也平全部
           actualSize = currentFollowerSize;
-          description = signal.isFullClose ? "⬜ 平多仓" : "⬜ 平多仓(减仓金额不足)";
-        } else {
+          description = "⬜ 平多仓";
+        } else if (longReduceNotional >= this.minOrderNotionalUsd) {
+          // 减仓金额足够 → 正常减仓
           actualSize = longReduceSize;
           description = "🟡 减多仓";
+        } else if (longPositionNotional >= longBoostTarget) {
+          // 仓位够大，提升减仓到 $11
+          actualSize = longBoostTarget / price;
+          description = "🟡 减多仓(提升到最小金额)";
+        } else {
+          // 仓位太小，直接平全部
+          actualSize = currentFollowerSize;
+          description = "⬜ 平多仓(仓位不足最小金额)";
         }
         break;
 
       case "Close Short":
         action = "buy";
         reduceOnly = true;
-        // 方案 2：跟单者没有空仓，跳过
+        // 跟单者没有空仓，跳过
         if (currentFollowerSize >= 0) {
           this.log.debug("No short position to reduce, skipping", { coin, currentFollowerSize });
           return null;
         }
-        // 方案 A：减仓金额不足时直接平全部
+        // 计算减仓相关数值
         const absFollowerSize = Math.abs(currentFollowerSize);
         const shortReduceSize = Math.min(followerSize, absFollowerSize);
         const shortReduceNotional = shortReduceSize * price;
-        if (signal.isFullClose || shortReduceNotional < this.minOrderNotionalUsd) {
+        const shortPositionNotional = absFollowerSize * price;  // 跟单者全部仓位价值
+        const shortBoostTarget = this.minOrderNotionalUsd + 1;  // $11 安全余量
+
+        if (signal.isFullClose) {
+          // 领航员完全平仓 → 跟单者也平全部
           actualSize = absFollowerSize;
-          description = signal.isFullClose ? "⬜ 平空仓" : "⬜ 平空仓(减仓金额不足)";
-        } else {
+          description = "⬜ 平空仓";
+        } else if (shortReduceNotional >= this.minOrderNotionalUsd) {
+          // 减仓金额足够 → 正常减仓
           actualSize = shortReduceSize;
           description = "🟡 减空仓";
+        } else if (shortPositionNotional >= shortBoostTarget) {
+          // 仓位够大，提升减仓到 $11
+          actualSize = shortBoostTarget / price;
+          description = "🟡 减空仓(提升到最小金额)";
+        } else {
+          // 仓位太小，直接平全部
+          actualSize = absFollowerSize;
+          description = "⬜ 平空仓(仓位不足最小金额)";
         }
         break;
 
