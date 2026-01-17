@@ -362,10 +362,13 @@ export class SignalProcessor {
 
     const fundRatio = followerEquity / leaderEquity;
     const copyRatio = this.deps.risk.copyRatio ?? 1;
-    const followerSize = signal.size * fundRatio * copyRatio;
+    let followerSize = signal.size * fundRatio * copyRatio;
 
     // Calculate notional value
-    const notional = followerSize * signal.price;
+    let notional = followerSize * signal.price;
+
+    // Determine if this is an opening (increase position) or closing (reduce position) action
+    const isOpeningAction = this.isOpeningDirection(signal.direction);
 
     // Determine action type description
     const actionDesc = this.getActionDescription(signal);
@@ -379,21 +382,38 @@ export class SignalProcessor {
       price: "$" + signal.price.toFixed(2),
       isNewPosition: signal.isNewPosition,
       isFullClose: signal.isFullClose,
+      isOpeningAction,
     });
 
-    // Check minimum notional
-    if (notional < this.minOrderNotionalUsd) {
-      this.log.info(`⏭️ Skipping small trade`, {
-        coin: signal.coin,
-        followerNotional: "$" + notional.toFixed(2),
-        threshold: "$" + this.minOrderNotionalUsd.toFixed(2),
-        reason: "金额低于最小阈值",
-      });
-      this.tradeLogger?.logTradeSkipped(
-        signal.coin,
-        `金额低于最小阈值 ($${notional.toFixed(2)} < $${this.minOrderNotionalUsd})`,
-      );
-      return;
+    // 方案 C：开仓提升到最小金额，减仓免阈值
+    if (isOpeningAction) {
+      // 开仓/加仓：如果金额不足最小阈值，提升到最小阈值
+      if (notional < this.minOrderNotionalUsd) {
+        const originalNotional = notional;
+        const originalSize = followerSize;
+        // 提升 size 使金额达到最小阈值
+        followerSize = this.minOrderNotionalUsd / signal.price;
+        notional = this.minOrderNotionalUsd;
+        this.log.info(`📈 Boosting open position to minimum`, {
+          coin: signal.coin,
+          originalNotional: "$" + originalNotional.toFixed(2),
+          boostedNotional: "$" + notional.toFixed(2),
+          originalSize: originalSize.toFixed(6),
+          boostedSize: followerSize.toFixed(6),
+          reason: "开仓金额不足，提升到最小阈值",
+        });
+      }
+    } else {
+      // 减仓/平仓：免除最小阈值检查（减仓是降低风险，应该执行）
+      // 但如果金额太小（< $1），记录一下但仍然执行
+      if (notional < this.minOrderNotionalUsd) {
+        this.log.info(`📉 Executing reduce position below threshold`, {
+          coin: signal.coin,
+          notional: "$" + notional.toFixed(2),
+          threshold: "$" + this.minOrderNotionalUsd.toFixed(2),
+          reason: "减仓免阈值，降低风险优先",
+        });
+      }
     }
 
     // Determine action
@@ -588,6 +608,26 @@ export class SignalProcessor {
         this.tradeLogger?.logTradeFailed(action, errorMessage);
         this.tradeLogger?.logError("订单执行异常", error instanceof Error ? error : undefined);
       }
+    }
+  }
+
+  /**
+   * Check if the direction is an opening action (increase position).
+   * Opening: Open Long, Open Short, Long > Short, Short > Long
+   * Closing: Close Long, Close Short
+   */
+  private isOpeningDirection(direction: TradingDirection): boolean {
+    switch (direction) {
+      case "Open Long":
+      case "Open Short":
+      case "Long > Short": // 反向开仓也是开仓（会建立新方向的仓位）
+      case "Short > Long":
+        return true;
+      case "Close Long":
+      case "Close Short":
+        return false;
+      default:
+        return true; // 默认当作开仓处理（更安全）
     }
   }
 
