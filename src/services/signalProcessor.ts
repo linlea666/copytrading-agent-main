@@ -572,10 +572,11 @@ export class SignalProcessor {
 
     const markPrice = this.deps.metadataService.getMarkPrice(action.coin) ?? action.price;
 
-    // Calculate slippage price (3% for protection)
-    const slippage = Math.max((this.deps.risk.maxSlippageBps ?? 300) / 10_000, 0.03);
+    // 市价单滑点保护（10%，与官方 TP/SL 市价单一致）
+    // 使用 Ioc (Immediate or Cancel) 确保立即成交或取消
+    const slippage = 0.1; // 10% 滑点保护
     const priceMultiplier = action.action === "buy" ? 1 + slippage : 1 - slippage;
-    const limitPrice = clamp(markPrice * priceMultiplier, markPrice * 0.1, markPrice * 10);
+    const limitPrice = clamp(markPrice * priceMultiplier, markPrice * 0.5, markPrice * 2);
     const priceStr = roundToMarkPricePrecision(limitPrice, markPrice);
 
     const sizeStr = action.size.toFixed(metadata.sizeDecimals);
@@ -595,8 +596,11 @@ export class SignalProcessor {
       notional: "$" + notional.toFixed(2),
       price: "$" + markPrice.toFixed(2),
       reduceOnly: action.reduceOnly,
+      orderType: "Ioc(市价)",
     });
 
+    // 使用 Ioc (Immediate or Cancel) 订单类型
+    // 配合 10% 滑点保护，实现类似市价单的立即成交效果
     const order = {
       a: metadata.assetId,
       b: action.action === "buy",
@@ -605,7 +609,7 @@ export class SignalProcessor {
       r: action.reduceOnly,
       t: {
         limit: {
-          tif: "FrontendMarket" as const,
+          tif: "Ioc" as const, // Immediate or Cancel - 立即成交或取消
         },
       },
       c: `0x${randomUUID().replace(/-/g, "").slice(0, 32)}`,
