@@ -562,6 +562,7 @@ export class SignalProcessor {
 
   /**
    * Execute a copy action by placing an order.
+   * Uses mid price (order book midpoint) for execution, matching official SDK behavior.
    */
   private async executeAction(action: CopyAction): Promise<void> {
     const metadata = this.deps.metadataService.getByCoin(action.coin);
@@ -570,13 +571,20 @@ export class SignalProcessor {
       return;
     }
 
-    const markPrice = this.deps.metadataService.getMarkPrice(action.coin) ?? action.price;
+    // 刷新中间价以获取最新订单簿价格（与官方 SDK 一致）
+    await this.deps.metadataService.refreshMidPrices();
 
-    // 市价单滑点保护（10%，与官方 TP/SL 市价单一致）
+    // 优先使用中间价（订单簿中点），回退到标记价格，最后使用信号价格
+    const executionPrice = this.deps.metadataService.getExecutionPrice(action.coin) ?? action.price;
+    const markPrice = this.deps.metadataService.getMarkPrice(action.coin) ?? executionPrice;
+
+    // 从配置获取滑点，默认 5%（与官方 SDK 一致）
+    const slippage = this.deps.risk.marketOrderSlippage ?? 0.05;
+    
+    // 市价单 = 激进限价单 + IoC（与官方 SDK 实现一致）
     // 使用 Ioc (Immediate or Cancel) 确保立即成交或取消
-    const slippage = 0.1; // 10% 滑点保护
     const priceMultiplier = action.action === "buy" ? 1 + slippage : 1 - slippage;
-    const limitPrice = clamp(markPrice * priceMultiplier, markPrice * 0.5, markPrice * 2);
+    const limitPrice = clamp(executionPrice * priceMultiplier, executionPrice * 0.5, executionPrice * 2);
     const priceStr = roundToMarkPricePrecision(limitPrice, markPrice);
 
     const sizeStr = action.size.toFixed(metadata.sizeDecimals);
@@ -587,14 +595,15 @@ export class SignalProcessor {
       return;
     }
 
-    const notional = action.size * markPrice;
+    const notional = action.size * executionPrice;
 
     this.log.info(`${action.description}`, {
       coin: action.coin,
       action: action.action === "buy" ? "买入" : "卖出",
       size: sizeStr,
       notional: "$" + notional.toFixed(2),
-      price: "$" + markPrice.toFixed(2),
+      midPrice: "$" + executionPrice.toFixed(2),
+      slippage: (slippage * 100).toFixed(1) + "%",
       reduceOnly: action.reduceOnly,
       orderType: "Ioc(市价)",
     });

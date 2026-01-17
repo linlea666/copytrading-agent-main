@@ -34,6 +34,7 @@ export class MarketMetadataService {
   private loaded = false;
   private readonly coinToMeta = new Map<string, AssetMetadata>();
   private readonly coinToMarkPx = new Map<string, number>();
+  private readonly coinToMidPx = new Map<string, number>();
 
   constructor(private readonly infoClient: hl.InfoClient, private readonly log: Logger = logger) {}
 
@@ -90,6 +91,48 @@ export class MarketMetadataService {
    */
   getMarkPrice(coin: string): number | undefined {
     return this.coinToMarkPx.get(coin);
+  }
+
+  /**
+   * Gets the current mid price (order book mid) for a coin.
+   * Mid price = (best bid + best ask) / 2
+   */
+  getMidPrice(coin: string): number | undefined {
+    return this.coinToMidPx.get(coin);
+  }
+
+  /**
+   * Gets the best available price for order execution.
+   * Priority: mid price > mark price
+   * 
+   * Mid price is preferred as it reflects actual order book state,
+   * matching the official SDK's market order implementation.
+   */
+  getExecutionPrice(coin: string): number | undefined {
+    return this.coinToMidPx.get(coin) ?? this.coinToMarkPx.get(coin);
+  }
+
+  /**
+   * Fetches and caches all mid prices from the API.
+   * Mid prices represent the midpoint between best bid and ask.
+   *
+   * @param signal - Optional abort signal to cancel the request
+   */
+  async refreshMidPrices(signal?: AbortSignal): Promise<void> {
+    try {
+      const mids = await this.infoClient.allMids(undefined, signal);
+      for (const [coin, price] of Object.entries(mids)) {
+        const numPrice = typeof price === "string" ? parseFloat(price) : price;
+        if (!isNaN(numPrice) && numPrice > 0) {
+          this.coinToMidPx.set(coin, numPrice);
+        }
+      }
+      this.log.debug("Refreshed mid prices", { count: this.coinToMidPx.size });
+    } catch (error) {
+      this.log.warn("Failed to refresh mid prices", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**

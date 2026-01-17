@@ -30,6 +30,11 @@ export interface RiskConfig {
   maxSlippageBps: number;
   /** When true, invert leader direction (long->short, short->long) */
   inverse: boolean;
+  /**
+   * Slippage tolerance for market orders (as decimal, e.g., 0.05 = 5%).
+   * @default 0.05 (5%, matches official SDK)
+   */
+  marketOrderSlippage?: number;
 }
 
 /**

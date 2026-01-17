@@ -52,6 +52,18 @@ export interface PairRiskConfig {
    * @default 5 (5%)
    */
   maxPositionDeviationPercent?: number;
+
+  /**
+   * Slippage tolerance for market orders (as decimal, e.g., 0.05 = 5%).
+   * 
+   * Market orders are executed as aggressive limit orders with IOC (Immediate or Cancel).
+   * This slippage determines the price limit:
+   * - Buy: midPrice × (1 + slippage)
+   * - Sell: midPrice × (1 - slippage)
+   * 
+   * @default 0.05 (5%, matches official SDK)
+   */
+  marketOrderSlippage?: number;
 }
 
 /**
@@ -184,6 +196,7 @@ export const CONFIG_DEFAULTS = {
       maxSlippageBps: 25,
       inverse: false,
       maxPositionDeviationPercent: 5,
+      marketOrderSlippage: 0.05,
     },
   },
 } as const;
