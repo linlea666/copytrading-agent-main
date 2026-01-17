@@ -386,21 +386,24 @@ export class SignalProcessor {
     });
 
     // 方案 C：开仓提升到最小金额，减仓免阈值
+    // 安全余量：在最小阈值基础上加 $1，避免精度截断后低于交易所限制
+    const boostTargetNotional = this.minOrderNotionalUsd + 1; // $10 + $1 = $11
+
     if (isOpeningAction) {
-      // 开仓/加仓：如果金额不足最小阈值，提升到最小阈值
+      // 开仓/加仓：如果金额不足最小阈值，提升到 boostTargetNotional
       if (notional < this.minOrderNotionalUsd) {
         const originalNotional = notional;
         const originalSize = followerSize;
-        // 提升 size 使金额达到最小阈值
-        followerSize = this.minOrderNotionalUsd / signal.price;
-        notional = this.minOrderNotionalUsd;
+        // 提升 size 使金额达到 boostTargetNotional（带安全余量）
+        followerSize = boostTargetNotional / signal.price;
+        notional = boostTargetNotional;
         this.log.info(`📈 Boosting open position to minimum`, {
           coin: signal.coin,
           originalNotional: "$" + originalNotional.toFixed(2),
           boostedNotional: "$" + notional.toFixed(2),
           originalSize: originalSize.toFixed(6),
           boostedSize: followerSize.toFixed(6),
-          reason: "开仓金额不足，提升到最小阈值",
+          reason: "开仓金额不足，提升到最小阈值+安全余量",
         });
       }
     } else {
