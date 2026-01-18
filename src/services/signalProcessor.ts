@@ -476,10 +476,17 @@ export class SignalProcessor {
         const longPositionNotional = currentFollowerSize * price;  // 跟单者全部仓位价值
         const longBoostTarget = this.minOrderNotionalUsd + 1;  // $11 安全余量
 
-        if (signal.isFullClose) {
-          // 领航员完全平仓 → 跟单者也平全部
+        // 检查领航员当前实际仓位（解决 fills 分批到达导致 isFullClose 判断不准的问题）
+        const leaderLongPos = this.deps.leaderState.getPosition(coin);
+        const leaderLongSize = leaderLongPos?.size ?? 0;
+        const leaderHasNoLongPosition = leaderLongSize <= EPSILON;
+
+        if (signal.isFullClose || leaderHasNoLongPosition) {
+          // 领航员完全平仓或已无仓位 → 跟单者也平全部
           actualSize = currentFollowerSize;
-          description = "⬜ 平多仓";
+          description = leaderHasNoLongPosition && !signal.isFullClose
+            ? "⬜ 平多仓(领航员已无仓位)"
+            : "⬜ 平多仓";
         } else if (longReduceNotional >= this.minOrderNotionalUsd) {
           // 减仓金额足够 → 正常减仓
           actualSize = longReduceSize;
@@ -510,10 +517,17 @@ export class SignalProcessor {
         const shortPositionNotional = absFollowerSize * price;  // 跟单者全部仓位价值
         const shortBoostTarget = this.minOrderNotionalUsd + 1;  // $11 安全余量
 
-        if (signal.isFullClose) {
-          // 领航员完全平仓 → 跟单者也平全部
+        // 检查领航员当前实际仓位（解决 fills 分批到达导致 isFullClose 判断不准的问题）
+        const leaderShortPos = this.deps.leaderState.getPosition(coin);
+        const leaderShortSize = leaderShortPos?.size ?? 0;
+        const leaderHasNoShortPosition = leaderShortSize >= -EPSILON;
+
+        if (signal.isFullClose || leaderHasNoShortPosition) {
+          // 领航员完全平仓或已无仓位 → 跟单者也平全部
           actualSize = absFollowerSize;
-          description = "⬜ 平空仓";
+          description = leaderHasNoShortPosition && !signal.isFullClose
+            ? "⬜ 平空仓(领航员已无仓位)"
+            : "⬜ 平空仓";
         } else if (shortReduceNotional >= this.minOrderNotionalUsd) {
           // 减仓金额足够 → 正常减仓
           actualSize = shortReduceSize;
