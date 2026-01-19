@@ -463,8 +463,27 @@ export class SignalProcessor {
         break;
 
       case "Close Long":
-        action = "sell";
         reduceOnly = true;
+        // 检查领航员当前实际仓位
+        const leaderLongPos = this.deps.leaderState.getPosition(coin);
+        const leaderLongSize = leaderLongPos?.size ?? 0;
+        const leaderHasNoLongPosition = Math.abs(leaderLongSize) <= EPSILON;  // 领航员完全无仓位
+
+        // 领航员无仓位时，平掉跟单者任意方向的仓位（修复仓位方向不同步问题）
+        if (leaderHasNoLongPosition && Math.abs(currentFollowerSize) > EPSILON) {
+          if (currentFollowerSize > 0) {
+            action = "sell";
+            actualSize = currentFollowerSize;
+            description = "⬜ 平多仓(领航员已无仓位)";
+          } else {
+            action = "buy";
+            actualSize = Math.abs(currentFollowerSize);
+            description = "⬜ 平空仓(领航员已无仓位-方向修正)";
+          }
+          break;
+        }
+
+        action = "sell";
         // 跟单者没有多仓，跳过
         if (currentFollowerSize <= 0) {
           this.log.debug("No long position to reduce, skipping", { coin, currentFollowerSize });
@@ -476,17 +495,10 @@ export class SignalProcessor {
         const longPositionNotional = currentFollowerSize * price;  // 跟单者全部仓位价值
         const longBoostTarget = this.minOrderNotionalUsd + 1;  // $11 安全余量
 
-        // 检查领航员当前实际仓位（解决 fills 分批到达导致 isFullClose 判断不准的问题）
-        const leaderLongPos = this.deps.leaderState.getPosition(coin);
-        const leaderLongSize = leaderLongPos?.size ?? 0;
-        const leaderHasNoLongPosition = leaderLongSize <= EPSILON;
-
-        if (signal.isFullClose || leaderHasNoLongPosition) {
-          // 领航员完全平仓或已无仓位 → 跟单者也平全部
+        if (signal.isFullClose) {
+          // 领航员完全平仓 → 跟单者也平全部
           actualSize = currentFollowerSize;
-          description = leaderHasNoLongPosition && !signal.isFullClose
-            ? "⬜ 平多仓(领航员已无仓位)"
-            : "⬜ 平多仓";
+          description = "⬜ 平多仓";
         } else if (longReduceNotional >= this.minOrderNotionalUsd) {
           // 减仓金额足够 → 正常减仓
           actualSize = longReduceSize;
@@ -503,8 +515,27 @@ export class SignalProcessor {
         break;
 
       case "Close Short":
-        action = "buy";
         reduceOnly = true;
+        // 检查领航员当前实际仓位
+        const leaderShortPos = this.deps.leaderState.getPosition(coin);
+        const leaderShortSize = leaderShortPos?.size ?? 0;
+        const leaderHasNoShortPosition = Math.abs(leaderShortSize) <= EPSILON;  // 领航员完全无仓位
+
+        // 领航员无仓位时，平掉跟单者任意方向的仓位（修复仓位方向不同步问题）
+        if (leaderHasNoShortPosition && Math.abs(currentFollowerSize) > EPSILON) {
+          if (currentFollowerSize < 0) {
+            action = "buy";
+            actualSize = Math.abs(currentFollowerSize);
+            description = "⬜ 平空仓(领航员已无仓位)";
+          } else {
+            action = "sell";
+            actualSize = currentFollowerSize;
+            description = "⬜ 平多仓(领航员已无仓位-方向修正)";
+          }
+          break;
+        }
+
+        action = "buy";
         // 跟单者没有空仓，跳过
         if (currentFollowerSize >= 0) {
           this.log.debug("No short position to reduce, skipping", { coin, currentFollowerSize });
@@ -517,17 +548,10 @@ export class SignalProcessor {
         const shortPositionNotional = absFollowerSize * price;  // 跟单者全部仓位价值
         const shortBoostTarget = this.minOrderNotionalUsd + 1;  // $11 安全余量
 
-        // 检查领航员当前实际仓位（解决 fills 分批到达导致 isFullClose 判断不准的问题）
-        const leaderShortPos = this.deps.leaderState.getPosition(coin);
-        const leaderShortSize = leaderShortPos?.size ?? 0;
-        const leaderHasNoShortPosition = leaderShortSize >= -EPSILON;
-
-        if (signal.isFullClose || leaderHasNoShortPosition) {
-          // 领航员完全平仓或已无仓位 → 跟单者也平全部
+        if (signal.isFullClose) {
+          // 领航员完全平仓 → 跟单者也平全部
           actualSize = absFollowerSize;
-          description = leaderHasNoShortPosition && !signal.isFullClose
-            ? "⬜ 平空仓(领航员已无仓位)"
-            : "⬜ 平空仓";
+          description = "⬜ 平空仓";
         } else if (shortReduceNotional >= this.minOrderNotionalUsd) {
           // 减仓金额足够 → 正常减仓
           actualSize = shortReduceSize;
