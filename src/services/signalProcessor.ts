@@ -548,7 +548,19 @@ export class SignalProcessor {
         action = "sell";
         // 不设 reduceOnly，允许反向开仓
         // 计算实际需要的卖出数量 = 平掉多仓 + 开空仓
-        description = "🔄 反向：多转空";
+        if (currentFollowerSize > EPSILON) {
+          // 跟单者有多仓，需要卖出：现有多仓 + 按比例计算的空仓
+          actualSize = currentFollowerSize + followerSize;
+          description = "🔄 反向：多转空(平多+开空)";
+        } else if (currentFollowerSize < -EPSILON) {
+          // 跟单者已经是空仓，只加空仓
+          actualSize = followerSize;
+          description = "🔴 加空仓";
+        } else {
+          // 跟单者无仓位，开空仓
+          actualSize = followerSize;
+          description = "🔴 新开空仓";
+        }
         break;
 
       // 反向开仓：空转多 (买入平空 + 开多)
@@ -556,7 +568,19 @@ export class SignalProcessor {
         action = "buy";
         // 不设 reduceOnly，允许反向开仓
         // 计算实际需要的买入数量 = 平掉空仓 + 开多仓
-        description = "🔄 反向：空转多";
+        if (currentFollowerSize < -EPSILON) {
+          // 跟单者有空仓，需要买入：现有空仓(绝对值) + 按比例计算的多仓
+          actualSize = Math.abs(currentFollowerSize) + followerSize;
+          description = "🔄 反向：空转多(平空+开多)";
+        } else if (currentFollowerSize > EPSILON) {
+          // 跟单者已经是多仓，只加多仓
+          actualSize = followerSize;
+          description = "🟢 加多仓";
+        } else {
+          // 跟单者无仓位，开多仓
+          actualSize = followerSize;
+          description = "🟢 新开多仓";
+        }
         break;
 
       default:
