@@ -116,6 +116,10 @@ export class HistoryPositionTracker {
     }
 
     this.initialized = true;
+    
+    // Mark initial snapshot as processed (prevents re-marking on restart)
+    this.persistence.markInitialized();
+    
     const result = Array.from(this.historicalCoins);
 
     if (result.length > 0) {

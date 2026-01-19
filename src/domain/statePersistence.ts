@@ -53,6 +53,8 @@ export interface PersistedPairState {
   clearedPositions: ClearedPosition[];
   /** Schema version for future migrations */
   schemaVersion: number;
+  /** Whether initial snapshot has been processed (prevents re-marking on restart) */
+  initializedSnapshot: boolean;
 }
 
 /** Current schema version */
@@ -115,12 +117,20 @@ export class StatePersistence {
           // Reset historical positions but keep audit trail
           return this.createInitialState();
         } else {
+          // Migrate old state files that don't have initializedSnapshot
+          // If state file exists and was loaded successfully, it means we've run before
+          if (state.initializedSnapshot === undefined) {
+            state.initializedSnapshot = true;  // Assume old files are already initialized
+            this.log.info(`Migrated old state file, setting initializedSnapshot=true`);
+          }
+          
           // Valid state loaded
           this.log.info(`Loaded persisted state`, {
             pairId: this.pairId,
             historicalPositions: state.historicalPositions.length,
             clearedPositions: state.clearedPositions.length,
             lastRunAt: state.lastRunAt,
+            initializedSnapshot: state.initializedSnapshot,
           });
           return state;
         }
@@ -148,6 +158,7 @@ export class StatePersistence {
       historicalPositions: [],
       clearedPositions: [],
       schemaVersion: SCHEMA_VERSION,
+      initializedSnapshot: false,
     };
   }
 
@@ -189,10 +200,26 @@ export class StatePersistence {
   }
 
   /**
-   * Checks if this is the first startup (no historical positions recorded).
+   * Checks if this is the first startup (initial snapshot not yet processed).
+   * 
+   * Fixed: Previously checked if historicalPositions was empty, which was wrong
+   * because if leader had no positions at first startup, historicalPositions 
+   * would be empty, and restart would wrongly treat it as first startup.
    */
   isFirstStart(): boolean {
-    return this.state.historicalPositions.length === 0 && this.state.clearedPositions.length === 0;
+    return !this.state.initializedSnapshot;
+  }
+
+  /**
+   * Marks the initial snapshot as processed.
+   * Call this after initialize() completes to prevent re-marking on restart.
+   */
+  markInitialized(): void {
+    if (!this.state.initializedSnapshot) {
+      this.state.initializedSnapshot = true;
+      this.log.info("Marked initial snapshot as processed");
+      this.scheduleSave();
+    }
   }
 
   /**
