@@ -15,7 +15,7 @@
 
 import { logger, type Logger } from "../utils/logger.js";
 import type { PositionSnapshot } from "./types.js";
-import { StatePersistence, type CoinRatioCache } from "./statePersistence.js";
+import { StatePersistence } from "./statePersistence.js";
 
 /**
  * Tracks historical positions and determines which trades can be copied.
@@ -227,48 +227,6 @@ export class HistoryPositionTracker {
    */
   isHistorical(coin: string): boolean {
     return this.historicalCoins.has(coin);
-  }
-
-  // ============================================================
-  // 方案 A: 固定比例缓存代理方法 (Coin Ratio Cache Proxy)
-  // ============================================================
-
-  /**
-   * Gets the cached fund ratio for a coin.
-   * Returns undefined if no ratio is cached.
-   * 
-   * @param coin - Trading pair symbol (e.g., "BTC")
-   */
-  getCoinRatio(coin: string): CoinRatioCache | undefined {
-    return this.persistence.getCoinRatio(coin);
-  }
-
-  /**
-   * Sets (caches) the fund ratio for a coin when opening a new position.
-   * 
-   * @param coin - Trading pair symbol
-   * @param ratio - The fund ratio (followerEquity / leaderEquity)
-   * @param direction - Position direction ("long" or "short")
-   */
-  setCoinRatio(coin: string, ratio: number, direction: "long" | "short"): void {
-    this.persistence.setCoinRatio(coin, ratio, direction);
-  }
-
-  /**
-   * Clears the cached fund ratio for a coin.
-   * 
-   * @param coin - Trading pair symbol
-   * @param reason - Why the ratio is being cleared
-   */
-  clearCoinRatio(coin: string, reason: "closed" | "flipped"): void {
-    this.persistence.clearCoinRatio(coin, reason);
-  }
-
-  /**
-   * Gets all cached coin ratios.
-   */
-  getAllCoinRatios(): Record<string, CoinRatioCache> {
-    return this.persistence.getAllCoinRatios();
   }
 
   /**
