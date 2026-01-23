@@ -36,6 +36,22 @@ export interface ClearedPosition {
 }
 
 /**
+ * Cached fund ratio for a coin (方案 A: 固定比例).
+ * 
+ * When a new position is opened, we cache the fund ratio (followerEquity / leaderEquity).
+ * All subsequent add-position trades for this coin use this fixed ratio,
+ * ensuring the follower's entry price aligns with the leader's.
+ */
+export interface CoinRatioCache {
+  /** The cached fund ratio (followerEquity / leaderEquity at first open) */
+  ratio: number;
+  /** Timestamp when this ratio was cached */
+  createdAt: string;
+  /** Direction of the position when ratio was cached */
+  direction: "long" | "short";
+}
+
+/**
  * Complete persisted state for a copy trading pair.
  */
 export interface PersistedPairState {
@@ -55,6 +71,12 @@ export interface PersistedPairState {
   schemaVersion: number;
   /** Whether initial snapshot has been processed (prevents re-marking on restart) */
   initializedSnapshot: boolean;
+  /** 
+   * Cached fund ratios per coin (方案 A: 固定比例).
+   * Key is coin symbol (e.g., "BTC", "ETH").
+   * Used to maintain consistent entry prices between leader and follower.
+   */
+  coinRatioCache?: Record<string, CoinRatioCache>;
 }
 
 /** Current schema version */
@@ -124,11 +146,18 @@ export class StatePersistence {
             this.log.info(`Migrated old state file, setting initializedSnapshot=true`);
           }
           
+          // Migrate old state files that don't have coinRatioCache
+          if (state.coinRatioCache === undefined) {
+            state.coinRatioCache = {};
+            this.log.info(`Migrated old state file, initializing coinRatioCache`);
+          }
+          
           // Valid state loaded
           this.log.info(`Loaded persisted state`, {
             pairId: this.pairId,
             historicalPositions: state.historicalPositions.length,
             clearedPositions: state.clearedPositions.length,
+            coinRatioCacheCount: Object.keys(state.coinRatioCache).length,
             lastRunAt: state.lastRunAt,
             initializedSnapshot: state.initializedSnapshot,
           });
@@ -159,6 +188,7 @@ export class StatePersistence {
       clearedPositions: [],
       schemaVersion: SCHEMA_VERSION,
       initializedSnapshot: false,
+      coinRatioCache: {},
     };
   }
 
@@ -292,6 +322,78 @@ export class StatePersistence {
    */
   getAllHistoricalPositions(): readonly PersistedPosition[] {
     return this.state.historicalPositions;
+  }
+
+  // ============================================================
+  // 方案 A: 固定比例缓存管理 (Coin Ratio Cache)
+  // ============================================================
+
+  /**
+   * Gets the cached fund ratio for a coin.
+   * Returns undefined if no ratio is cached for this coin.
+   * 
+   * @param coin - Trading pair symbol (e.g., "BTC")
+   */
+  getCoinRatio(coin: string): CoinRatioCache | undefined {
+    return this.state.coinRatioCache?.[coin];
+  }
+
+  /**
+   * Sets (caches) the fund ratio for a coin when opening a new position.
+   * This ratio will be used for all subsequent add-position trades.
+   * 
+   * @param coin - Trading pair symbol
+   * @param ratio - The fund ratio to cache (followerEquity / leaderEquity)
+   * @param direction - Position direction ("long" or "short")
+   */
+  setCoinRatio(coin: string, ratio: number, direction: "long" | "short"): void {
+    if (!this.state.coinRatioCache) {
+      this.state.coinRatioCache = {};
+    }
+
+    this.state.coinRatioCache[coin] = {
+      ratio,
+      direction,
+      createdAt: new Date().toISOString(),
+    };
+
+    this.log.info(`Cached fund ratio for ${coin}`, {
+      coin,
+      ratio: ratio.toFixed(8),
+      direction,
+    });
+    this.scheduleSave();
+  }
+
+  /**
+   * Clears the cached fund ratio for a coin.
+   * Called when a position is fully closed or direction flips.
+   * 
+   * @param coin - Trading pair symbol
+   * @param reason - Why the ratio is being cleared
+   */
+  clearCoinRatio(coin: string, reason: "closed" | "flipped"): void {
+    if (!this.state.coinRatioCache?.[coin]) {
+      return;
+    }
+
+    const cached = this.state.coinRatioCache[coin];
+    delete this.state.coinRatioCache[coin];
+
+    this.log.info(`Cleared fund ratio cache for ${coin}`, {
+      coin,
+      previousRatio: cached.ratio.toFixed(8),
+      previousDirection: cached.direction,
+      reason,
+    });
+    this.scheduleSave();
+  }
+
+  /**
+   * Gets all cached coin ratios.
+   */
+  getAllCoinRatios(): Record<string, CoinRatioCache> {
+    return this.state.coinRatioCache ?? {};
   }
 
   /**

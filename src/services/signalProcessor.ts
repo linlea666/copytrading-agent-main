@@ -360,8 +360,49 @@ export class SignalProcessor {
       return;
     }
 
-    const fundRatio = followerEquity / leaderEquity;
+    // 方案 A: 固定比例 - 使用首次开仓时的比例，保持入场价一致
     const copyRatio = this.deps.risk.copyRatio ?? 1;
+    let fundRatio: number;
+    let ratioSource: "cached" | "calculated";
+
+    // 判断信号方向对应的仓位方向
+    const signalDirection = this.getSignalPositionDirection(signal.direction);
+
+    if (this.deps.historyTracker) {
+      const cachedRatio = this.deps.historyTracker.getCoinRatio(signal.coin);
+      
+      if (signal.isNewPosition || !cachedRatio) {
+        // 新开仓 或 无缓存：计算并缓存比例
+        fundRatio = followerEquity / leaderEquity;
+        ratioSource = "calculated";
+        
+        // 缓存比例（仅在有 historyTracker 且是新开仓时）
+        if (signal.isNewPosition && signalDirection) {
+          this.deps.historyTracker.setCoinRatio(signal.coin, fundRatio, signalDirection);
+        }
+      } else if (cachedRatio.direction !== signalDirection && signalDirection) {
+        // 方向不同（反向开仓）：清除旧缓存，使用新比例
+        this.deps.historyTracker.clearCoinRatio(signal.coin, "flipped");
+        fundRatio = followerEquity / leaderEquity;
+        ratioSource = "calculated";
+        this.deps.historyTracker.setCoinRatio(signal.coin, fundRatio, signalDirection);
+        this.log.info(`Position direction changed, recalculated ratio`, {
+          coin: signal.coin,
+          oldDirection: cachedRatio.direction,
+          newDirection: signalDirection,
+          newRatio: fundRatio.toFixed(8),
+        });
+      } else {
+        // 加仓：使用缓存的固定比例
+        fundRatio = cachedRatio.ratio;
+        ratioSource = "cached";
+      }
+    } else {
+      // 无 historyTracker：每次动态计算（兼容旧逻辑）
+      fundRatio = followerEquity / leaderEquity;
+      ratioSource = "calculated";
+    }
+
     let followerSize = signal.size * fundRatio * copyRatio;
 
     // Calculate notional value
@@ -373,7 +414,7 @@ export class SignalProcessor {
     // Determine action type description
     const actionDesc = this.getActionDescription(signal);
 
-    // Log signal details
+    // Log signal details with ratio info
     this.log.info(`🔔 Leader signal: ${actionDesc}`, {
       coin: signal.coin,
       direction: signal.direction,
@@ -383,6 +424,8 @@ export class SignalProcessor {
       isNewPosition: signal.isNewPosition,
       isFullClose: signal.isFullClose,
       isOpeningAction,
+      fundRatio: fundRatio.toFixed(8),
+      ratioSource,  // "cached" 或 "calculated"
     });
 
     // 方案 C：开仓提升到最小金额，减仓免阈值
@@ -471,6 +514,8 @@ export class SignalProcessor {
 
         // 领航员无仓位时，平掉跟单者任意方向的仓位（修复仓位方向不同步问题）
         if (leaderHasNoLongPosition && Math.abs(currentFollowerSize) > EPSILON) {
+          // 清除比例缓存（领航员已无仓位）
+          this.deps.historyTracker?.clearCoinRatio(coin, "closed");
           if (currentFollowerSize > 0) {
             action = "sell";
             actualSize = currentFollowerSize;
@@ -499,6 +544,8 @@ export class SignalProcessor {
           // 领航员完全平仓 → 跟单者也平全部
           actualSize = currentFollowerSize;
           description = "⬜ 平多仓";
+          // 清除比例缓存（完全平仓）
+          this.deps.historyTracker?.clearCoinRatio(coin, "closed");
         } else if (longReduceNotional >= this.minOrderNotionalUsd) {
           // 减仓金额足够 → 正常减仓
           actualSize = longReduceSize;
@@ -511,6 +558,8 @@ export class SignalProcessor {
           // 仓位太小，直接平全部
           actualSize = currentFollowerSize;
           description = "⬜ 平多仓(仓位不足最小金额)";
+          // 清除比例缓存（全平）
+          this.deps.historyTracker?.clearCoinRatio(coin, "closed");
         }
         break;
 
@@ -523,6 +572,8 @@ export class SignalProcessor {
 
         // 领航员无仓位时，平掉跟单者任意方向的仓位（修复仓位方向不同步问题）
         if (leaderHasNoShortPosition && Math.abs(currentFollowerSize) > EPSILON) {
+          // 清除比例缓存（领航员已无仓位）
+          this.deps.historyTracker?.clearCoinRatio(coin, "closed");
           if (currentFollowerSize < 0) {
             action = "buy";
             actualSize = Math.abs(currentFollowerSize);
@@ -552,6 +603,8 @@ export class SignalProcessor {
           // 领航员完全平仓 → 跟单者也平全部
           actualSize = absFollowerSize;
           description = "⬜ 平空仓";
+          // 清除比例缓存（完全平仓）
+          this.deps.historyTracker?.clearCoinRatio(coin, "closed");
         } else if (shortReduceNotional >= this.minOrderNotionalUsd) {
           // 减仓金额足够 → 正常减仓
           actualSize = shortReduceSize;
@@ -564,6 +617,8 @@ export class SignalProcessor {
           // 仓位太小，直接平全部
           actualSize = absFollowerSize;
           description = "⬜ 平空仓(仓位不足最小金额)";
+          // 清除比例缓存（全平）
+          this.deps.historyTracker?.clearCoinRatio(coin, "closed");
         }
         break;
 
@@ -743,6 +798,28 @@ export class SignalProcessor {
         return false;
       default:
         return true; // 默认当作开仓处理（更安全）
+    }
+  }
+
+  /**
+   * Get the position direction implied by a trading signal.
+   * Used for ratio caching to track which direction the cached ratio applies to.
+   * 
+   * @returns "long" for long positions, "short" for short positions, null for closing actions
+   */
+  private getSignalPositionDirection(direction: TradingDirection): "long" | "short" | null {
+    switch (direction) {
+      case "Open Long":
+      case "Short > Long":  // 空转多，最终是多仓
+        return "long";
+      case "Open Short":
+      case "Long > Short":  // 多转空，最终是空仓
+        return "short";
+      case "Close Long":
+      case "Close Short":
+        return null;  // 平仓不建立新方向
+      default:
+        return null;
     }
   }
 
