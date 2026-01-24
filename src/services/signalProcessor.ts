@@ -562,9 +562,40 @@ export class SignalProcessor {
           actualSize = longReduceSize;
           description = "🟡 减多仓";
         } else if (longPositionNotional >= longBoostTarget) {
-          // 减仓金额不足但仓位够大，提升减仓到 $11
+          // 减仓金额不足但仓位够大，检查价格是否有利再决定是否提升
+          const longMarkPrice = this.deps.metadataService.getMarkPrice(coin) ?? price;
+          const longPriceDiff = (longMarkPrice - price) / price;
+          const longThreshold = this.deps.risk.boostPriceThreshold ?? 0.0005;
+
+          // Close Long（卖出）：当前价比领航员低太多 → 不利（卖便宜了）
+          const longPriceUnfavorable = longPriceDiff < -longThreshold;
+
+          if (longPriceUnfavorable) {
+            this.log.info(`⏭️ 减仓价格不利，跳过`, {
+              coin,
+              direction: "Close Long",
+              leaderPrice: "$" + price.toFixed(4),
+              currentPrice: "$" + longMarkPrice.toFixed(4),
+              priceDiff: (longPriceDiff * 100).toFixed(4) + "%",
+              threshold: (longThreshold * 100).toFixed(4) + "%",
+              reason: "减仓价格不利，跳过提升",
+            });
+            this.tradeLogger?.logTradeSkipped(
+              coin,
+              `减仓价格不利(${(longPriceDiff * 100).toFixed(2)}%)`
+            );
+            return null;
+          }
+
+          // 价格有利或可接受，提升减仓到 $11
           actualSize = longBoostTarget / price;
           description = "🟡 减多仓(提升到最小金额)";
+          this.log.debug(`✅ 减仓价格有利，执行提升`, {
+            coin,
+            leaderPrice: "$" + price.toFixed(4),
+            currentPrice: "$" + longMarkPrice.toFixed(4),
+            priceDiff: (longPriceDiff * 100).toFixed(4) + "%",
+          });
         } else {
           // 仓位太小，直接平全部
           actualSize = currentFollowerSize;
@@ -631,9 +662,40 @@ export class SignalProcessor {
           actualSize = shortReduceSize;
           description = "🟡 减空仓";
         } else if (shortPositionNotional >= shortBoostTarget) {
-          // 减仓金额不足但仓位够大，提升减仓到 $11
+          // 减仓金额不足但仓位够大，检查价格是否有利再决定是否提升
+          const shortMarkPrice = this.deps.metadataService.getMarkPrice(coin) ?? price;
+          const shortPriceDiff = (shortMarkPrice - price) / price;
+          const shortThreshold = this.deps.risk.boostPriceThreshold ?? 0.0005;
+
+          // Close Short（买入）：当前价比领航员高太多 → 不利（买贵了）
+          const shortPriceUnfavorable = shortPriceDiff > shortThreshold;
+
+          if (shortPriceUnfavorable) {
+            this.log.info(`⏭️ 减仓价格不利，跳过`, {
+              coin,
+              direction: "Close Short",
+              leaderPrice: "$" + price.toFixed(4),
+              currentPrice: "$" + shortMarkPrice.toFixed(4),
+              priceDiff: (shortPriceDiff * 100).toFixed(4) + "%",
+              threshold: (shortThreshold * 100).toFixed(4) + "%",
+              reason: "减仓价格不利，跳过提升",
+            });
+            this.tradeLogger?.logTradeSkipped(
+              coin,
+              `减仓价格不利(${(shortPriceDiff * 100).toFixed(2)}%)`
+            );
+            return null;
+          }
+
+          // 价格有利或可接受，提升减仓到 $11
           actualSize = shortBoostTarget / price;
           description = "🟡 减空仓(提升到最小金额)";
+          this.log.debug(`✅ 减仓价格有利，执行提升`, {
+            coin,
+            leaderPrice: "$" + price.toFixed(4),
+            currentPrice: "$" + shortMarkPrice.toFixed(4),
+            priceDiff: (shortPriceDiff * 100).toFixed(4) + "%",
+          });
         } else {
           // 仓位太小，直接平全部
           actualSize = absFollowerSize;
