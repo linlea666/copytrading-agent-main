@@ -64,6 +64,20 @@ export interface PairRiskConfig {
    * @default 0.05 (5%, matches official SDK)
    */
   marketOrderSlippage?: number;
+
+  /**
+   * Price deviation threshold for boosting add-position orders (as decimal).
+   * 
+   * When an add-position order needs to be boosted to meet minimum notional,
+   * this threshold determines if the current price is favorable enough to execute:
+   * - Long: skip if currentPrice > leaderPrice × (1 + threshold)
+   * - Short: skip if currentPrice < leaderPrice × (1 - threshold)
+   * 
+   * Only applies to add-position orders (not new positions or reversals).
+   * 
+   * @default 0.0005 (0.05%, about $50 for BTC at $100k)
+   */
+  boostPriceThreshold?: number;
 }
 
 /**
@@ -197,6 +211,7 @@ export const CONFIG_DEFAULTS = {
       inverse: false,
       maxPositionDeviationPercent: 5,
       marketOrderSlippage: 0.05,
+      boostPriceThreshold: 0.0005,
     },
   },
 } as const;

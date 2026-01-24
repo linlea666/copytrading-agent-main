@@ -392,6 +392,48 @@ export class SignalProcessor {
     if (isOpeningAction) {
       // 开仓/加仓：如果金额不足最小阈值，提升到 boostTargetNotional
       if (notional < this.minOrderNotionalUsd) {
+        // 区分新开仓和加仓：只对加仓进行价格有利检查
+        // 新开仓和反向开仓（视为新开仓）直接提升，不检查价格
+        const isNewOrReversal = signal.isNewPosition || 
+          signal.direction === "Long > Short" || 
+          signal.direction === "Short > Long";
+
+        if (!isNewOrReversal) {
+          // 加仓：检查价格是否有利
+          const markPrice = this.deps.metadataService.getMarkPrice(signal.coin) ?? signal.price;
+          const priceDiff = (markPrice - signal.price) / signal.price;
+          const threshold = this.deps.risk.boostPriceThreshold ?? 0.0005;  // 默认 0.05%
+
+          // 多单：当前价比领航员成交价高太多 → 不利（买入亏）
+          // 空单：当前价比领航员成交价低太多 → 不利（做空亏）
+          const isLong = signal.direction === "Open Long";
+          const priceUnfavorable = isLong ? (priceDiff > threshold) : (priceDiff < -threshold);
+
+          if (priceUnfavorable) {
+            this.log.info(`⏭️ 跳过不利价格的加仓`, {
+              coin: signal.coin,
+              direction: signal.direction,
+              leaderPrice: "$" + signal.price.toFixed(4),
+              currentPrice: "$" + markPrice.toFixed(4),
+              priceDiff: (priceDiff * 100).toFixed(4) + "%",
+              threshold: (threshold * 100).toFixed(4) + "%",
+              reason: "加仓价格不利，跳过提升",
+            });
+            this.tradeLogger?.logTradeSkipped(
+              signal.coin, 
+              `加仓价格不利(${(priceDiff * 100).toFixed(2)}%)`
+            );
+            return;  // 跳过本次加仓
+          }
+
+          this.log.debug(`✅ 加仓价格有利，执行提升`, {
+            coin: signal.coin,
+            leaderPrice: "$" + signal.price.toFixed(4),
+            currentPrice: "$" + markPrice.toFixed(4),
+            priceDiff: (priceDiff * 100).toFixed(4) + "%",
+          });
+        }
+
         const originalNotional = notional;
         const originalSize = followerSize;
         // 提升 size 使金额达到 boostTargetNotional（带安全余量）
@@ -403,7 +445,7 @@ export class SignalProcessor {
           boostedNotional: "$" + notional.toFixed(2),
           originalSize: originalSize.toFixed(6),
           boostedSize: followerSize.toFixed(6),
-          reason: "开仓金额不足，提升到最小阈值+安全余量",
+          reason: isNewOrReversal ? "新开仓/反向开仓，无条件提升" : "加仓价格有利，提升到最小阈值",
         });
       }
     } else {
@@ -489,22 +531,38 @@ export class SignalProcessor {
           this.log.debug("No long position to reduce, skipping", { coin, currentFollowerSize });
           return null;
         }
-        // 计算减仓相关数值
-        const longReduceSize = Math.min(followerSize, currentFollowerSize);
+
+        // 【改用仓位比例】计算领航员减仓比例，跟单者按同比例减仓
+        const leaderLongStartPos = Math.abs(signal.startPosition);
+        const leaderLongReduceRatio = leaderLongStartPos > EPSILON 
+          ? signal.size / leaderLongStartPos 
+          : 1;  // 安全处理：如果 startPosition 为 0，视为全平
+        
+        // 跟单者按比例计算减仓数量
+        const longReduceSize = currentFollowerSize * leaderLongReduceRatio;
         const longReduceNotional = longReduceSize * price;
         const longPositionNotional = currentFollowerSize * price;  // 跟单者全部仓位价值
         const longBoostTarget = this.minOrderNotionalUsd + 1;  // $11 安全余量
 
-        if (signal.isFullClose) {
-          // 领航员完全平仓 → 跟单者也平全部
+        this.log.debug("减仓比例计算(多仓)", {
+          coin,
+          leaderStartPos: signal.startPosition.toFixed(6),
+          leaderReduceSize: signal.size.toFixed(6),
+          leaderReduceRatio: (leaderLongReduceRatio * 100).toFixed(2) + "%",
+          followerCurrentSize: currentFollowerSize.toFixed(6),
+          followerReduceSize: longReduceSize.toFixed(6),
+        });
+
+        if (signal.isFullClose || leaderLongReduceRatio >= 0.99) {
+          // 领航员完全平仓或减仓比例 >= 99% → 跟单者也平全部
           actualSize = currentFollowerSize;
           description = "⬜ 平多仓";
         } else if (longReduceNotional >= this.minOrderNotionalUsd) {
-          // 减仓金额足够 → 正常减仓
+          // 减仓金额足够 → 按比例减仓
           actualSize = longReduceSize;
           description = "🟡 减多仓";
         } else if (longPositionNotional >= longBoostTarget) {
-          // 仓位够大，提升减仓到 $11
+          // 减仓金额不足但仓位够大，提升减仓到 $11
           actualSize = longBoostTarget / price;
           description = "🟡 减多仓(提升到最小金额)";
         } else {
@@ -541,23 +599,39 @@ export class SignalProcessor {
           this.log.debug("No short position to reduce, skipping", { coin, currentFollowerSize });
           return null;
         }
-        // 计算减仓相关数值
+
+        // 【改用仓位比例】计算领航员减仓比例，跟单者按同比例减仓
+        const leaderShortStartPos = Math.abs(signal.startPosition);
+        const leaderShortReduceRatio = leaderShortStartPos > EPSILON 
+          ? signal.size / leaderShortStartPos 
+          : 1;  // 安全处理：如果 startPosition 为 0，视为全平
+        
+        // 跟单者按比例计算减仓数量
         const absFollowerSize = Math.abs(currentFollowerSize);
-        const shortReduceSize = Math.min(followerSize, absFollowerSize);
+        const shortReduceSize = absFollowerSize * leaderShortReduceRatio;
         const shortReduceNotional = shortReduceSize * price;
         const shortPositionNotional = absFollowerSize * price;  // 跟单者全部仓位价值
         const shortBoostTarget = this.minOrderNotionalUsd + 1;  // $11 安全余量
 
-        if (signal.isFullClose) {
-          // 领航员完全平仓 → 跟单者也平全部
+        this.log.debug("减仓比例计算(空仓)", {
+          coin,
+          leaderStartPos: signal.startPosition.toFixed(6),
+          leaderReduceSize: signal.size.toFixed(6),
+          leaderReduceRatio: (leaderShortReduceRatio * 100).toFixed(2) + "%",
+          followerCurrentSize: currentFollowerSize.toFixed(6),
+          followerReduceSize: shortReduceSize.toFixed(6),
+        });
+
+        if (signal.isFullClose || leaderShortReduceRatio >= 0.99) {
+          // 领航员完全平仓或减仓比例 >= 99% → 跟单者也平全部
           actualSize = absFollowerSize;
           description = "⬜ 平空仓";
         } else if (shortReduceNotional >= this.minOrderNotionalUsd) {
-          // 减仓金额足够 → 正常减仓
+          // 减仓金额足够 → 按比例减仓
           actualSize = shortReduceSize;
           description = "🟡 减空仓";
         } else if (shortPositionNotional >= shortBoostTarget) {
-          // 仓位够大，提升减仓到 $11
+          // 减仓金额不足但仓位够大，提升减仓到 $11
           actualSize = shortBoostTarget / price;
           description = "🟡 减空仓(提升到最小金额)";
         } else {

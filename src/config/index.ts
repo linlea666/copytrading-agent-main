@@ -35,6 +35,11 @@ export interface RiskConfig {
    * @default 0.05 (5%, matches official SDK)
    */
   marketOrderSlippage?: number;
+  /**
+   * Price deviation threshold for boosting add-position orders (as decimal).
+   * @default 0.0005 (0.05%)
+   */
+  boostPriceThreshold?: number;
 }
 
 /**
