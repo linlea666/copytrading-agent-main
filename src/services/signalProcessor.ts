@@ -426,11 +426,12 @@ export class SignalProcessor {
             return;  // 跳过本次加仓
           }
 
-          this.log.debug(`✅ 加仓价格有利，执行提升`, {
+          this.log.info(`✅ 加仓价格有利，执行提升`, {
             coin: signal.coin,
             leaderPrice: "$" + signal.price.toFixed(4),
             currentPrice: "$" + markPrice.toFixed(4),
             priceDiff: (priceDiff * 100).toFixed(4) + "%",
+            threshold: (threshold * 100).toFixed(4) + "%",
           });
         }
 
@@ -590,11 +591,12 @@ export class SignalProcessor {
           // 价格有利或可接受，提升减仓到 $11
           actualSize = longBoostTarget / price;
           description = "🟡 减多仓(提升到最小金额)";
-          this.log.debug(`✅ 减仓价格有利，执行提升`, {
+          this.log.info(`✅ 减仓价格有利，执行提升`, {
             coin,
             leaderPrice: "$" + price.toFixed(4),
             currentPrice: "$" + longMarkPrice.toFixed(4),
             priceDiff: (longPriceDiff * 100).toFixed(4) + "%",
+            threshold: (longThreshold * 100).toFixed(4) + "%",
           });
         } else {
           // 仓位太小，直接平全部
@@ -690,11 +692,12 @@ export class SignalProcessor {
           // 价格有利或可接受，提升减仓到 $11
           actualSize = shortBoostTarget / price;
           description = "🟡 减空仓(提升到最小金额)";
-          this.log.debug(`✅ 减仓价格有利，执行提升`, {
+          this.log.info(`✅ 减仓价格有利，执行提升`, {
             coin,
             leaderPrice: "$" + price.toFixed(4),
             currentPrice: "$" + shortMarkPrice.toFixed(4),
             priceDiff: (shortPriceDiff * 100).toFixed(4) + "%",
+            threshold: (shortThreshold * 100).toFixed(4) + "%",
           });
         } else {
           // 仓位太小，直接平全部
