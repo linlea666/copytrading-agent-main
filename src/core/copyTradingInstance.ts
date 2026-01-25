@@ -117,7 +117,7 @@ export class CopyTradingInstance {
       this.log,
     );
 
-    // Initialize reconciler (state sync only, no trading)
+    // Initialize reconciler (state sync + fallback full close)
     const reconcilerConfig = {
       leaderAddress: pairConfig.leaderAddress,
       reconciliationIntervalMs: globalConfig.reconciliationIntervalMs,
@@ -130,6 +130,16 @@ export class CopyTradingInstance {
       clients.followerTradingAddress,
       this.log,
     );
+
+    // Enable fallback full close feature
+    this.reconciler.setFallbackDeps({
+      exchangeClient: clients.exchangeClient,
+      metadataService: sharedMetadata,
+      historyTracker: this.historyTracker,
+      ...(pairConfig.risk.marketOrderSlippage !== undefined && {
+        marketOrderSlippage: pairConfig.risk.marketOrderSlippage,
+      }),
+    });
   }
 
   /**
