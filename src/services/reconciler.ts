@@ -10,7 +10,6 @@
  * - Recovery after WebSocket disconnection
  * - Periodic state verification (backup mechanism)
  * - **Fallback full close**: If leader has no position but follower does, close it
- * - **Position aggregation mode**: Batch sync add/reduce position signals
  *
  * The fallback full close ensures position consistency even when WebSocket signals are lost.
  */
@@ -20,7 +19,6 @@ import type { CopyTradingConfig } from "../config/index.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { LeaderState } from "../domain/leaderState.js";
 import { FollowerState } from "../domain/followerState.js";
-import type { PositionSnapshot } from "../domain/types.js";
 import type { HistoryPositionTracker } from "../domain/historyTracker.js";
 import type { MarketMetadataService } from "./marketMetadata.js";
 import { clamp } from "../utils/math.js";
@@ -65,34 +63,12 @@ export interface ReconcilerFallbackDeps {
 }
 
 /**
- * Aggregation mode configuration.
- * 
- * 聚合模式下只执行加仓同步，不执行减仓同步。
- * 减仓通过以下方式触发：
- * 1. 实时信号（领航员发出 Close Long/Close Short）
- * 2. 兜底全平（领航员无仓位但跟单者有仓位）
- */
-export interface AggregationConfig {
-  /** Whether aggregation mode is enabled */
-  enabled: boolean;
-  /** Copy ratio for position sizing */
-  copyRatio: number;
-  /** Minimum order notional in USD */
-  minOrderNotionalUsd: number;
-}
-
-/**
  * Manages periodic reconciliation of leader and follower states.
  * Also performs fallback full close when leader has no position but follower does.
- * 
- * In aggregation mode, also handles batch syncing of add/reduce position signals.
  */
 export class Reconciler {
   private intervalHandle: NodeJS.Timeout | null = null;
   private fallbackDeps: ReconcilerFallbackDeps | null = null;
-  
-  /** Aggregation mode configuration */
-  private aggregationConfig: AggregationConfig | null = null;
 
   constructor(
     private readonly infoClient: hl.InfoClient,
@@ -110,20 +86,6 @@ export class Reconciler {
   setFallbackDeps(deps: ReconcilerFallbackDeps): void {
     this.fallbackDeps = deps;
     this.log.info("Fallback full close enabled");
-  }
-
-  /**
-   * Enables aggregation mode for batch syncing add/reduce position signals.
-   * Call this after construction if aggregation mode is needed.
-   */
-  enableAggregationMode(config: AggregationConfig): void {
-    this.aggregationConfig = config;
-    this.log.info("📦 仓位聚合模式已启用（对账器）", {
-      copyRatio: config.copyRatio,
-      minOrderNotionalUsd: "$" + config.minOrderNotionalUsd,
-      加仓: "对账周期批量同步",
-      减仓: "仅通过实时信号或兜底全平",
-    });
   }
 
   /**
@@ -162,11 +124,6 @@ export class Reconciler {
     // Fallback full close: check for orphaned follower positions
     if (this.fallbackDeps) {
       await this.checkAndCloseFallbackPositions(leaderPositions, followerPositions);
-    }
-
-    // Aggregation mode: sync position differences
-    if (this.aggregationConfig?.enabled && this.fallbackDeps) {
-      await this.syncPositionDifferences();
     }
   }
 
@@ -328,243 +285,5 @@ export class Reconciler {
     this.log.info("Stopping reconciler");
     clearInterval(this.intervalHandle);
     this.intervalHandle = null;
-  }
-
-  // ==================== 仓位聚合模式：差异同步 ====================
-
-  /**
-   * Syncs position differences between leader and follower.
-   * Only called when aggregation mode is enabled.
-   */
-  private async syncPositionDifferences(): Promise<void> {
-    if (!this.aggregationConfig || !this.fallbackDeps) return;
-
-    const leaderPositions = this.leaderState.getPositions();
-    const followerPositions = this.followerState.getPositions();
-    const leaderEquity = this.leaderState.getMetrics().accountValueUsd;
-    const followerEquity = this.followerState.getMetrics().accountValueUsd;
-
-    if (leaderEquity <= 0 || followerEquity <= 0) {
-      this.log.warn("[聚合同步] 账户资产异常，跳过同步", {
-        leaderEquity: "$" + leaderEquity.toFixed(2),
-        followerEquity: "$" + followerEquity.toFixed(2),
-      });
-      return;
-    }
-
-    const fundRatio = followerEquity / leaderEquity;
-
-    // Check each leader position for sync needs
-    if (leaderPositions.size === 0) {
-      this.log.debug("[聚合同步] 领航员无持仓，跳过同步");
-      return;
-    }
-
-    this.log.debug("[聚合同步] 开始检查仓位差异", {
-      leaderPositionCount: leaderPositions.size,
-      followerPositionCount: followerPositions.size,
-      fundRatio: fundRatio.toFixed(6),
-    });
-
-    for (const [coin, leaderPos] of leaderPositions) {
-      const followerPos = followerPositions.get(coin);
-      
-      await this.syncSinglePosition(
-        coin,
-        leaderPos as PositionSnapshot,
-        followerPos as PositionSnapshot | undefined,
-        fundRatio,
-      );
-    }
-  }
-
-  /**
-   * Syncs a single position between leader and follower.
-   */
-  private async syncSinglePosition(
-    coin: string,
-    leaderPos: PositionSnapshot,
-    followerPos: PositionSnapshot | undefined,
-    fundRatio: number,
-  ): Promise<void> {
-    if (!this.aggregationConfig || !this.fallbackDeps) return;
-
-    const leaderSize = leaderPos.size;
-    const followerSize = followerPos?.size ?? 0;
-
-    // Skip if leader has no position (handled by fallback full close)
-    if (Math.abs(leaderSize) <= EPSILON) {
-      return;
-    }
-
-    // Calculate target size for follower
-    const targetSize = leaderSize * fundRatio * this.aggregationConfig.copyRatio;
-    const sizeDiff = targetSize - followerSize;
-
-    // Skip if difference is negligible
-    if (Math.abs(sizeDiff) <= EPSILON) {
-      return;
-    }
-
-    const markPrice = this.fallbackDeps.metadataService.getMarkPrice(coin);
-    if (!markPrice || markPrice <= 0) {
-      return;
-    }
-
-    const diffNotional = Math.abs(sizeDiff) * markPrice;
-
-    // Skip if notional is below minimum
-    if (diffNotional < this.aggregationConfig.minOrderNotionalUsd) {
-      this.log.debug(`[聚合同步] 差异金额不足最小阈值，跳过`, {
-        coin,
-        diffNotional: "$" + diffNotional.toFixed(2),
-        minNotional: "$" + this.aggregationConfig.minOrderNotionalUsd,
-      });
-      return;
-    }
-
-    // Determine if this is add position or reduce position
-    // Add position: sizeDiff and leaderSize have same sign
-    // Reduce position: sizeDiff and leaderSize have opposite signs
-    const isAddPosition = Math.sign(sizeDiff) === Math.sign(leaderSize);
-
-    // 聚合模式下只执行加仓同步，不执行减仓同步
-    // 理由：
-    // 1. 减仓应该跟随领航员的实际操作（实时信号），不应因 equity 波动触发
-    // 2. equity 波动可能导致 targetSize 变小，触发不合理的减仓
-    // 3. 完全平仓会立即执行（不受聚合模式影响）
-    // 4. 兜底全平会处理领航员平仓后的清理
-    if (!isAddPosition) {
-      this.log.debug(`[聚合同步] 跳过减仓（等待领航员实际操作）`, {
-        coin,
-        followerSize: followerSize.toFixed(6),
-        targetSize: targetSize.toFixed(6),
-        reason: "聚合模式下减仓仅通过实时信号或兜底全平执行",
-      });
-      return;
-    }
-
-    this.log.info(`📊 [聚合同步] 检测到仓位差异，需要加仓`, {
-      coin,
-      leaderSize: leaderSize.toFixed(6),
-      followerSize: followerSize.toFixed(6),
-      targetSize: targetSize.toFixed(6),
-      sizeDiff: sizeDiff.toFixed(6),
-      diffNotional: "$" + diffNotional.toFixed(2),
-    });
-
-    await this.executeAggregationAddPosition(coin, sizeDiff, leaderPos, markPrice);
-  }
-
-  /**
-   * Executes an add position order.
-   * 
-   * 加仓不检查价格，直接执行。
-   * 理由：
-   * 1. 聚合模式的目标是保持仓位比例一致，不是优化入场价格
-   * 2. 领航员的均价是多次交易的累积结果，不适合作为加仓的价格参考
-   * 3. 延迟是不可避免的，严格的价格检查会导致仓位永远无法同步
-   */
-  private async executeAggregationAddPosition(
-    coin: string,
-    sizeDiff: number,
-    leaderPos: PositionSnapshot,
-    _markPrice: number,
-  ): Promise<void> {
-    if (!this.aggregationConfig || !this.fallbackDeps) return;
-
-    // Execute the add position directly (no price check)
-    const isLong = leaderPos.size > 0;
-    const action = isLong ? "buy" : "sell";
-    await this.executePositionAdjust(coin, Math.abs(sizeDiff), action, false, "加仓");
-  }
-
-  /**
-   * Executes a position adjustment order.
-   * Reuses the order execution logic from fallback close.
-   */
-  private async executePositionAdjust(
-    coin: string,
-    size: number,
-    action: "buy" | "sell",
-    reduceOnly: boolean,
-    actionType: string,
-  ): Promise<void> {
-    if (!this.fallbackDeps) return;
-
-    const { exchangeClient, metadataService, marketOrderSlippage } = this.fallbackDeps;
-
-    try {
-      const metadata = metadataService.getByCoin(coin);
-      if (!metadata) {
-        this.log.error(`[聚合同步] 无法获取币种元数据`, { coin });
-        return;
-      }
-
-      const markPrice = metadataService.getMarkPrice(coin);
-      if (!markPrice || markPrice <= 0) {
-        this.log.error(`[聚合同步] 无法获取标记价格`, { coin });
-        return;
-      }
-
-      // Calculate slippage price
-      const slippage = marketOrderSlippage ?? 0.05;
-      const priceMultiplier = action === "buy" ? 1 + slippage : 1 - slippage;
-      const limitPrice = clamp(markPrice * priceMultiplier, markPrice * 0.5, markPrice * 2);
-      const priceStr = roundToMarkPricePrecision(limitPrice, markPrice);
-      const sizeStr = size.toFixed(metadata.sizeDecimals);
-
-      // Skip if size rounds to zero
-      if (parseFloat(sizeStr) === 0) {
-        this.log.debug(`[聚合同步] 数量取整后为零，跳过`, { coin });
-        return;
-      }
-
-      const notional = size * markPrice;
-
-      this.log.info(`📦 [聚合同步] 执行${actionType}`, {
-        coin,
-        action: action === "buy" ? "买入" : "卖出",
-        size: sizeStr,
-        notional: "$" + notional.toFixed(2),
-        price: "$" + priceStr,
-        slippage: (slippage * 100).toFixed(1) + "%",
-        reduceOnly,
-      });
-
-      const order = {
-        a: metadata.assetId,
-        b: action === "buy",
-        p: priceStr,
-        s: sizeStr,
-        r: reduceOnly,
-        t: { limit: { tif: "Ioc" as const } },
-        c: `0x${randomUUID().replace(/-/g, "").slice(0, 32)}`,
-      };
-
-      const response = await exchangeClient.order({
-        orders: [order],
-        grouping: "na",
-      });
-
-      const statuses = response.response.data.statuses;
-      const filled = statuses.filter((s) => "filled" in s || "resting" in s);
-      const errors = statuses.filter((s) => "error" in s);
-
-      if (filled.length > 0) {
-        this.log.info(`✅ [聚合同步] ${actionType}订单成功`, { coin, size: sizeStr });
-      }
-      if (errors.length > 0) {
-        this.log.warn(`❌ [聚合同步] ${actionType}订单失败`, {
-          coin,
-          errors: errors.map((e) => ("error" in e ? e.error : "unknown")),
-        });
-      }
-    } catch (error) {
-      this.log.error(`[聚合同步] ${actionType}执行失败`, {
-        coin,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
   }
 }

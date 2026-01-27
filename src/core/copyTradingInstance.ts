@@ -8,10 +8,19 @@
  * - Signal processing and trade execution
  * - Periodic state reconciliation
  *
- * Trading Flow (simplified):
+ * Two modes are supported:
+ * 1. Normal mode (default): Subscribe to userFills, execute IOC market orders
+ * 2. Order mirror mode: Subscribe to openOrders, execute GTC limit orders
+ *
+ * Trading Flow (Normal mode):
  * 1. WebSocket receives leader's fill events
  * 2. SignalProcessor processes fills and executes copy trades
- * 3. Reconciler periodically syncs state (no trading)
+ * 3. Reconciler periodically syncs state
+ *
+ * Trading Flow (Order mirror mode):
+ * 1. WebSocket receives leader's open orders
+ * 2. OrderMirrorService mirrors orders with same price
+ * 3. Reconciler periodically syncs state
  */
 
 import type * as hl from "@nktkas/hyperliquid";
@@ -22,6 +31,7 @@ import { HistoryPositionTracker } from "../domain/historyTracker.js";
 import { MarketMetadataService } from "../services/marketMetadata.js";
 import { SignalProcessor } from "../services/signalProcessor.js";
 import { SubscriptionService } from "../services/subscriptions.js";
+import { OrderMirrorService } from "../services/orderMirror.js";
 import { Reconciler } from "../services/reconciler.js";
 import { createInstanceLogger } from "../utils/instanceLogger.js";
 import { logger, type Logger } from "../utils/logger.js";
@@ -48,10 +58,18 @@ export class CopyTradingInstance {
   private readonly leaderState: LeaderState;
   private readonly followerState: FollowerState;
   private readonly historyTracker: HistoryPositionTracker;
-  private readonly signalProcessor: SignalProcessor;
-  private readonly subscriptions: SubscriptionService;
   private readonly reconciler: Reconciler;
   private readonly log: Logger;
+
+  // Normal mode components (mutually exclusive with order mirror)
+  private readonly signalProcessor?: SignalProcessor;
+  private readonly subscriptions?: SubscriptionService;
+
+  // Order mirror mode component
+  private readonly orderMirror?: OrderMirrorService;
+
+  /** Whether order mirror mode is enabled */
+  private readonly isOrderMirrorMode: boolean;
 
   private status: InstanceStatus = "created";
 
@@ -84,40 +102,66 @@ export class CopyTradingInstance {
       this.log,
     );
 
-    // Initialize signal processor (core trading logic)
-    this.signalProcessor = new SignalProcessor({
-      exchangeClient: clients.exchangeClient,
-      infoClient: clients.infoClient,
-      leaderAddress: pairConfig.leaderAddress as `0x${string}`,
-      followerAddress: clients.followerTradingAddress,
-      leaderState: this.leaderState,
-      followerState: this.followerState,
-      metadataService: this.sharedMetadata,
-      risk: pairConfig.risk,
-      minOrderNotionalUsd: pairConfig.minOrderNotionalUsd,
-      historyTracker: this.historyTracker,
-      syncLeverage: true,
-      log: this.log,
-      // Trade logging configuration
-      pairId: pairConfig.id,
-      logDir: globalConfig.stateDir,
-      enableTradeLog: globalConfig.enableTradeLog ?? true,
-      // Position aggregation mode
-      enablePositionAggregation: pairConfig.enablePositionAggregation ?? false,
-    });
+    // Determine mode
+    this.isOrderMirrorMode = pairConfig.enableOrderMirror ?? false;
 
-    // Initialize WebSocket subscription service
-    const subscriptionConfig = {
-      leaderAddress: pairConfig.leaderAddress,
-      websocketAggregateFills: globalConfig.websocketAggregateFills,
-    };
-    this.subscriptions = new SubscriptionService(
-      clients.subscriptionClient,
-      subscriptionConfig as any,
-      this.leaderState,
-      this.signalProcessor,
-      this.log,
-    );
+    if (this.isOrderMirrorMode) {
+      // ==================== Order Mirror Mode ====================
+      // Subscribe to leader's openOrders, mirror with GTC limit orders
+      this.log.info("📋 配置为限价单镜像模式");
+
+      this.orderMirror = new OrderMirrorService({
+        subscriptionClient: clients.subscriptionClient,
+        exchangeClient: clients.exchangeClient,
+        infoClient: clients.infoClient,
+        leaderAddress: pairConfig.leaderAddress as `0x${string}`,
+        followerAddress: clients.followerTradingAddress,
+        leaderState: this.leaderState,
+        followerState: this.followerState,
+        metadataService: sharedMetadata,
+        risk: pairConfig.risk,
+        minOrderNotionalUsd: pairConfig.minOrderNotionalUsd,
+        pairId: pairConfig.id,
+        log: this.log,
+      });
+    } else {
+      // ==================== Normal Mode ====================
+      // Subscribe to leader's userFills, execute IOC market orders
+      this.log.info("🔄 配置为正常跟单模式");
+
+      // Initialize signal processor (core trading logic)
+      this.signalProcessor = new SignalProcessor({
+        exchangeClient: clients.exchangeClient,
+        infoClient: clients.infoClient,
+        leaderAddress: pairConfig.leaderAddress as `0x${string}`,
+        followerAddress: clients.followerTradingAddress,
+        leaderState: this.leaderState,
+        followerState: this.followerState,
+        metadataService: this.sharedMetadata,
+        risk: pairConfig.risk,
+        minOrderNotionalUsd: pairConfig.minOrderNotionalUsd,
+        historyTracker: this.historyTracker,
+        syncLeverage: true,
+        log: this.log,
+        // Trade logging configuration
+        pairId: pairConfig.id,
+        logDir: globalConfig.stateDir,
+        enableTradeLog: globalConfig.enableTradeLog ?? true,
+      });
+
+      // Initialize WebSocket subscription service
+      const subscriptionConfig = {
+        leaderAddress: pairConfig.leaderAddress,
+        websocketAggregateFills: globalConfig.websocketAggregateFills,
+      };
+      this.subscriptions = new SubscriptionService(
+        clients.subscriptionClient,
+        subscriptionConfig as any,
+        this.leaderState,
+        this.signalProcessor,
+        this.log,
+      );
+    }
 
     // Initialize reconciler (state sync + fallback full close)
     const reconcilerConfig = {
@@ -142,16 +186,6 @@ export class CopyTradingInstance {
         marketOrderSlippage: pairConfig.risk.marketOrderSlippage,
       }),
     });
-
-    // Enable position aggregation mode if configured
-    // 聚合模式：加仓通过对账同步，减仓通过实时信号或兜底全平
-    if (pairConfig.enablePositionAggregation) {
-      this.reconciler.enableAggregationMode({
-        enabled: true,
-        copyRatio: pairConfig.risk.copyRatio,
-        minOrderNotionalUsd: pairConfig.minOrderNotionalUsd,
-      });
-    }
   }
 
   /**
@@ -249,16 +283,24 @@ export class CopyTradingInstance {
         this.log.info("No historical positions - all new leader trades will be copied");
       }
 
-      // 4. Start WebSocket subscriptions
-      // This is where copy trading happens - fills trigger SignalProcessor
-      await this.subscriptions.start();
+      // 4. Start appropriate service based on mode
+      if (this.isOrderMirrorMode) {
+        // Order mirror mode: subscribe to openOrders
+        await this.orderMirror!.start();
+        this.log.info("📡 监听领航员挂单中（限价单镜像模式）...");
+      } else {
+        // Normal mode: subscribe to userFills
+        await this.subscriptions!.start();
+        this.log.info("📡 监听领航员成交中（正常跟单模式）...");
+      }
 
       // 5. Start periodic state reconciliation (no trading, just state sync)
       this.reconciler.start();
 
       this.status = "running";
-      this.log.info("✅ Copy trading instance started successfully");
-      this.log.info("📡 Listening for leader trades via WebSocket...");
+      this.log.info("✅ Copy trading instance started successfully", {
+        mode: this.isOrderMirrorMode ? "限价单镜像" : "正常跟单",
+      });
     } catch (error) {
       this.status = "error";
       this.log.error("Failed to start copy trading instance", {
@@ -280,10 +322,16 @@ export class CopyTradingInstance {
     this.log.info("Stopping copy trading instance");
 
     try {
-      // Stop WebSocket subscriptions
-      await this.subscriptions.stop().catch((error) => {
-        this.log.error("Error stopping subscriptions", { error });
-      });
+      // Stop appropriate service based on mode
+      if (this.isOrderMirrorMode) {
+        await this.orderMirror?.stop().catch((error) => {
+          this.log.error("Error stopping order mirror", { error });
+        });
+      } else {
+        await this.subscriptions?.stop().catch((error) => {
+          this.log.error("Error stopping subscriptions", { error });
+        });
+      }
 
       // Stop periodic reconciliation
       this.reconciler.stop();

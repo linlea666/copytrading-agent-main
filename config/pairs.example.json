@@ -6,7 +6,7 @@
   "websocketAggregateFills": true,
   "stateDir": "./data/state",
   "enableTradeLog": true,
-  "_comment_global": "reconciliationIntervalMs 建议设为 60000(60秒)，聚合模式下可获得更好的订单合并效果",
+  "_comment_global": "reconciliationIntervalMs 建议设为 60000(60秒)",
   "pairs": [
     {
       "id": "smart-whale-1",
@@ -26,11 +26,11 @@
       "minOrderNotionalUsd": 15,
       "syncDebounceMs": 300,
       "enabled": true,
-      "_comment_1": "使用API钱包时: followerPrivateKey=API钱包私钥, followerAddress=主账户地址",
-      "_comment_2": "maxPositionDeviationPercent: 仓位偏离度超过此值时强制同步"
+      "_comment_1": "正常跟单模式（默认）：监听成交信号，使用市价单跟单",
+      "_comment_2": "使用API钱包时: followerPrivateKey=API钱包私钥, followerAddress=主账户地址"
     },
     {
-      "id": "frequent-trader",
+      "id": "limit-order-trader",
       "leaderAddress": "0x0987654321098765432109876543210987654321",
       "followerPrivateKey": "${FOLLOWER_2_PRIVATE_KEY}",
       "followerAddress": "0xYOUR_MAIN_ACCOUNT_ADDRESS_HERE",
@@ -47,12 +47,12 @@
       "minOrderNotionalUsd": 12,
       "syncDebounceMs": 500,
       "enabled": true,
-      "enablePositionAggregation": true,
-      "_comment_aggregation_1": "enablePositionAggregation: 启用仓位聚合模式，适用于频繁交易的领航员",
-      "_comment_aggregation_2": "聚合模式下：开仓/平仓立即执行",
-      "_comment_aggregation_3": "加仓：对账周期批量同步（减少订单数量和手续费）",
-      "_comment_aggregation_4": "减仓：仅通过实时信号或兜底全平执行（不会因 equity 波动触发）",
-      "_comment_aggregation_5": "reconciliationIntervalMs 建议设为 60000(60秒)以获得更好的聚合效果"
+      "enableOrderMirror": true,
+      "_comment_mirror_1": "enableOrderMirror: 启用限价单镜像模式",
+      "_comment_mirror_2": "监听领航员的挂单（openOrders），使用相同价格挂限价单",
+      "_comment_mirror_3": "适用于主要使用限价单的领航员，可降低手续费（Maker费率）",
+      "_comment_mirror_4": "注意：如果领航员使用市价单，本模式无法捕获",
+      "_comment_mirror_5": "重启后会自动恢复映射关系（通过cloid追溯）"
     }
   ]
 }

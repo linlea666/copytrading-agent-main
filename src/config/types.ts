@@ -135,23 +135,20 @@ export interface CopyPairConfig {
   /** Whether this pair is enabled for copy trading */
   enabled: boolean;
 
-  // ==================== 仓位聚合模式配置 ====================
-  // 针对频繁交易的领航员，将加仓信号延迟到对账周期批量执行
-  // 开仓、平仓、减仓信号不受影响，始终立即执行
+  // ==================== 限价单镜像模式配置 ====================
 
   /**
-   * 是否启用仓位聚合模式
+   * 是否启用限价单镜像模式
    * 
    * 启用后：
-   * - 开仓/平仓信号：立即执行（不变）
-   * - 加仓信号：跳过实时执行，通过对账周期批量同步
-   * - 减仓信号：立即执行（跟随领航员实际操作，不会因 equity 波动触发）
+   * - 订阅领航员的 openOrders（挂单）而非 userFills（成交）
+   * - 跟单者使用 GTC 限价单跟随领航员挂单价格
+   * - 适用于主要使用限价单的领航员，可降低手续费（Maker 费率）
    * 
-   * 适用于频繁交易的领航员，可显著减少订单数量和手续费
-   * 对账间隔使用全局配置 reconciliationIntervalMs（建议设为 60000）
+   * 注意：如果领航员使用市价单，本模式无法捕获
    * @default false
    */
-  enablePositionAggregation?: boolean;
+  enableOrderMirror?: boolean;
 }
 
 /**
@@ -212,7 +209,7 @@ export interface MultiCopyTradingConfig {
 export const CONFIG_DEFAULTS = {
   environment: "mainnet" as HyperliquidEnvironment,
   logLevel: "info" as LogLevel,
-  reconciliationIntervalMs: 60_000,  // 60秒对账间隔，聚合模式下可获得更好的订单合并效果
+  reconciliationIntervalMs: 60_000,  // 60秒对账间隔
   refreshAccountIntervalMs: 5_000,
   websocketAggregateFills: true,
   stateDir: "./data/state",
@@ -231,7 +228,7 @@ export const CONFIG_DEFAULTS = {
       marketOrderSlippage: 0.05,
       boostPriceThreshold: 0.0005,
     },
-    // 仓位聚合模式默认配置
-    enablePositionAggregation: false,
+    // 限价单镜像模式默认配置
+    enableOrderMirror: false,
   },
 } as const;
