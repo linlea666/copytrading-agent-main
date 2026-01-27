@@ -103,8 +103,6 @@ function normalizePairConfig(pair: Partial<CopyPairConfig>, index: number): Copy
     enabled: pair.enabled ?? CONFIG_DEFAULTS.pair.enabled,
     // 仓位聚合模式配置
     enablePositionAggregation: pair.enablePositionAggregation ?? CONFIG_DEFAULTS.pair.enablePositionAggregation,
-    reducePositionPriceThreshold: pair.reducePositionPriceThreshold ?? CONFIG_DEFAULTS.pair.reducePositionPriceThreshold,
-    maxPriceCheckSkipCount: pair.maxPriceCheckSkipCount ?? CONFIG_DEFAULTS.pair.maxPriceCheckSkipCount,
   };
 }
 

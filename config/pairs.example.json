@@ -1,12 +1,12 @@
 {
   "environment": "mainnet",
   "logLevel": "info",
-  "reconciliationIntervalMs": 20000,
+  "reconciliationIntervalMs": 60000,
   "refreshAccountIntervalMs": 5000,
   "websocketAggregateFills": true,
   "stateDir": "./data/state",
   "enableTradeLog": true,
-  "_comment_global": "reconciliationIntervalMs 建议设为 20000(20秒)，支持聚合模式的及时同步",
+  "_comment_global": "reconciliationIntervalMs 建议设为 60000(60秒)，聚合模式下可获得更好的订单合并效果",
   "pairs": [
     {
       "id": "smart-whale-1",
@@ -48,13 +48,11 @@
       "syncDebounceMs": 500,
       "enabled": true,
       "enablePositionAggregation": true,
-      "reducePositionPriceThreshold": 0.01,
-      "maxPriceCheckSkipCount": 5,
       "_comment_aggregation_1": "enablePositionAggregation: 启用仓位聚合模式，适用于频繁交易的领航员",
-      "_comment_aggregation_2": "聚合模式下：开仓/平仓立即执行，加仓/减仓由对账周期批量同步",
-      "_comment_aggregation_3": "加仓：直接执行，不检查价格（目标是保持仓位比例一致）",
-      "_comment_aggregation_4": "减仓：检查价格是否有利，reducePositionPriceThreshold 为容忍度(相对于跟单者入场均价)",
-      "_comment_aggregation_5": "maxPriceCheckSkipCount: 减仓价格不利时最大跳过次数，达到后放弃本次同步等待下次机会"
+      "_comment_aggregation_2": "聚合模式下：开仓/平仓立即执行",
+      "_comment_aggregation_3": "加仓：对账周期批量同步（减少订单数量和手续费）",
+      "_comment_aggregation_4": "减仓：仅通过实时信号或兜底全平执行（不会因 equity 波动触发）",
+      "_comment_aggregation_5": "reconciliationIntervalMs 建议设为 60000(60秒)以获得更好的聚合效果"
     }
   ]
 }

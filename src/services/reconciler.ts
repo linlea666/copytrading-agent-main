@@ -67,8 +67,10 @@ export interface ReconcilerFallbackDeps {
 /**
  * Aggregation mode configuration.
  * 
- * 加仓：直接执行，不检查价格（目标是保持仓位比例一致）
- * 减仓：检查价格是否有利（保护跟单者利益）
+ * 聚合模式下只执行加仓同步，不执行减仓同步。
+ * 减仓通过以下方式触发：
+ * 1. 实时信号（领航员发出 Close Long/Close Short）
+ * 2. 兜底全平（领航员无仓位但跟单者有仓位）
  */
 export interface AggregationConfig {
   /** Whether aggregation mode is enabled */
@@ -77,10 +79,6 @@ export interface AggregationConfig {
   copyRatio: number;
   /** Minimum order notional in USD */
   minOrderNotionalUsd: number;
-  /** Reduce position price threshold (relative to follower's entry price) */
-  reducePriceThreshold: number;
-  /** Maximum times to skip due to unfavorable price for reduce (0 = no price check) */
-  maxSkipCount: number;
 }
 
 /**
@@ -95,9 +93,6 @@ export class Reconciler {
   
   /** Aggregation mode configuration */
   private aggregationConfig: AggregationConfig | null = null;
-  
-  /** Price check skip counters (coin -> skip count) */
-  private priceCheckSkipCount = new Map<string, number>();
 
   constructor(
     private readonly infoClient: hl.InfoClient,
@@ -126,9 +121,8 @@ export class Reconciler {
     this.log.info("📦 仓位聚合模式已启用（对账器）", {
       copyRatio: config.copyRatio,
       minOrderNotionalUsd: "$" + config.minOrderNotionalUsd,
-      加仓: "直接执行（不检查价格）",
-      减仓价格阈值: (config.reducePriceThreshold * 100).toFixed(2) + "%",
-      减仓最大跳过次数: config.maxSkipCount,
+      加仓: "对账周期批量同步",
+      减仓: "仅通过实时信号或兜底全平",
     });
   }
 
@@ -359,14 +353,6 @@ export class Reconciler {
     }
 
     const fundRatio = followerEquity / leaderEquity;
-    
-    // 清理已不存在仓位的跳过计数器
-    for (const key of this.priceCheckSkipCount.keys()) {
-      const coin = key.replace(/^reduce:/, "");
-      if (!leaderPositions.has(coin)) {
-        this.priceCheckSkipCount.delete(key);
-      }
-    }
 
     // Check each leader position for sync needs
     if (leaderPositions.size === 0) {
@@ -442,21 +428,32 @@ export class Reconciler {
     // Reduce position: sizeDiff and leaderSize have opposite signs
     const isAddPosition = Math.sign(sizeDiff) === Math.sign(leaderSize);
 
-    this.log.info(`📊 [聚合同步] 检测到仓位差异`, {
+    // 聚合模式下只执行加仓同步，不执行减仓同步
+    // 理由：
+    // 1. 减仓应该跟随领航员的实际操作（实时信号），不应因 equity 波动触发
+    // 2. equity 波动可能导致 targetSize 变小，触发不合理的减仓
+    // 3. 完全平仓会立即执行（不受聚合模式影响）
+    // 4. 兜底全平会处理领航员平仓后的清理
+    if (!isAddPosition) {
+      this.log.debug(`[聚合同步] 跳过减仓（等待领航员实际操作）`, {
+        coin,
+        followerSize: followerSize.toFixed(6),
+        targetSize: targetSize.toFixed(6),
+        reason: "聚合模式下减仓仅通过实时信号或兜底全平执行",
+      });
+      return;
+    }
+
+    this.log.info(`📊 [聚合同步] 检测到仓位差异，需要加仓`, {
       coin,
       leaderSize: leaderSize.toFixed(6),
       followerSize: followerSize.toFixed(6),
       targetSize: targetSize.toFixed(6),
       sizeDiff: sizeDiff.toFixed(6),
       diffNotional: "$" + diffNotional.toFixed(2),
-      action: isAddPosition ? "需要加仓" : "需要减仓",
     });
 
-    if (isAddPosition) {
-      await this.executeAggregationAddPosition(coin, sizeDiff, leaderPos, markPrice);
-    } else {
-      await this.executeAggregationReducePosition(coin, sizeDiff, followerPos!, markPrice);
-    }
+    await this.executeAggregationAddPosition(coin, sizeDiff, leaderPos, markPrice);
   }
 
   /**
@@ -480,80 +477,6 @@ export class Reconciler {
     const isLong = leaderPos.size > 0;
     const action = isLong ? "buy" : "sell";
     await this.executePositionAdjust(coin, Math.abs(sizeDiff), action, false, "加仓");
-  }
-
-  /**
-   * Executes a reduce position order with price check.
-   * Uses follower's entry price as reference.
-   */
-  private async executeAggregationReducePosition(
-    coin: string,
-    sizeDiff: number,
-    followerPos: PositionSnapshot,
-    markPrice: number,
-  ): Promise<void> {
-    if (!this.aggregationConfig || !this.fallbackDeps) return;
-
-    const followerEntryPrice = followerPos.entryPrice;
-    const threshold = this.aggregationConfig.reducePriceThreshold;
-    const maxSkip = this.aggregationConfig.maxSkipCount;
-
-    // Check price if maxSkipCount > 0
-    if (maxSkip > 0) {
-      const isLong = followerPos.size > 0;
-      let priceOk: boolean;
-
-      if (isLong) {
-        // Long reduce (sell): current price should be >= entry × (1 - threshold)
-        priceOk = markPrice >= followerEntryPrice * (1 - threshold);
-      } else {
-        // Short reduce (buy): current price should be <= entry × (1 + threshold)
-        priceOk = markPrice <= followerEntryPrice * (1 + threshold);
-      }
-
-      const skipKey = `reduce:${coin}`;
-      const skipCount = this.priceCheckSkipCount.get(skipKey) ?? 0;
-
-      if (!priceOk) {
-        if (skipCount < maxSkip) {
-          this.log.info(`⏭️ [聚合同步] 减仓价格不利，跳过等待下次`, {
-            coin,
-            direction: isLong ? "多仓" : "空仓",
-            followerEntryPrice: "$" + followerEntryPrice.toFixed(4),
-            currentPrice: "$" + markPrice.toFixed(4),
-            threshold: (threshold * 100).toFixed(2) + "%",
-            skipCount: skipCount + 1,
-            maxSkip,
-          });
-          this.priceCheckSkipCount.set(skipKey, skipCount + 1);
-          return;
-        } else {
-          // Reached max skip count, give up this sync cycle
-          this.log.info(`🚫 [聚合同步] 减仓价格持续不利，放弃本次同步`, {
-            coin,
-            skipCount,
-            reason: "等待下一次领航员操作或价格回归",
-          });
-          this.priceCheckSkipCount.delete(skipKey);
-          return;
-        }
-      }
-
-      // Price is favorable, clear skip count
-      if (skipCount > 0) {
-        this.log.info(`✅ [聚合同步] 减仓价格有利，执行同步`, {
-          coin,
-          followerEntryPrice: "$" + followerEntryPrice.toFixed(4),
-          currentPrice: "$" + markPrice.toFixed(4),
-        });
-      }
-      this.priceCheckSkipCount.delete(skipKey);
-    }
-
-    // Execute the reduce position
-    const isLong = followerPos.size > 0;
-    const action = isLong ? "sell" : "buy";
-    await this.executePositionAdjust(coin, Math.abs(sizeDiff), action, true, "减仓");
   }
 
   /**

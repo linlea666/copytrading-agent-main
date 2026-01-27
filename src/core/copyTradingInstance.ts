@@ -144,15 +144,12 @@ export class CopyTradingInstance {
     });
 
     // Enable position aggregation mode if configured
+    // 聚合模式：加仓通过对账同步，减仓通过实时信号或兜底全平
     if (pairConfig.enablePositionAggregation) {
       this.reconciler.enableAggregationMode({
         enabled: true,
         copyRatio: pairConfig.risk.copyRatio,
         minOrderNotionalUsd: pairConfig.minOrderNotionalUsd,
-        // 加仓：直接执行，不检查价格
-        // 减仓：检查价格是否有利
-        reducePriceThreshold: pairConfig.reducePositionPriceThreshold ?? 0.01,
-        maxSkipCount: pairConfig.maxPriceCheckSkipCount ?? 5,
       });
     }
   }
