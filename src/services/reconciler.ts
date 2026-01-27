@@ -351,12 +351,35 @@ export class Reconciler {
     const followerEquity = this.followerState.getMetrics().accountValueUsd;
 
     if (leaderEquity <= 0 || followerEquity <= 0) {
+      this.log.warn("[聚合同步] 账户资产异常，跳过同步", {
+        leaderEquity: "$" + leaderEquity.toFixed(2),
+        followerEquity: "$" + followerEquity.toFixed(2),
+      });
       return;
     }
 
     const fundRatio = followerEquity / leaderEquity;
+    
+    // 清理已不存在仓位的跳过计数器
+    for (const key of this.priceCheckSkipCount.keys()) {
+      const coin = key.replace(/^reduce:/, "");
+      if (!leaderPositions.has(coin)) {
+        this.priceCheckSkipCount.delete(key);
+      }
+    }
 
     // Check each leader position for sync needs
+    if (leaderPositions.size === 0) {
+      this.log.debug("[聚合同步] 领航员无持仓，跳过同步");
+      return;
+    }
+
+    this.log.debug("[聚合同步] 开始检查仓位差异", {
+      leaderPositionCount: leaderPositions.size,
+      followerPositionCount: followerPositions.size,
+      fundRatio: fundRatio.toFixed(6),
+    });
+
     for (const [coin, leaderPos] of leaderPositions) {
       const followerPos = followerPositions.get(coin);
       
