@@ -2,6 +2,38 @@
  * Math utility functions for safe numeric operations.
  */
 
+/** Minimum position size to consider non-zero */
+export const EPSILON = 1e-9;
+
+/**
+ * Determines the number of decimal places in a number's string representation.
+ *
+ * @param value - Number to check
+ * @returns Number of decimal places
+ */
+export function getDecimalPlaces(value: number): number {
+  const str = value.toString();
+  const decimalIndex = str.indexOf(".");
+  if (decimalIndex === -1) return 0;
+  return str.length - decimalIndex - 1;
+}
+
+/**
+ * Rounds a price to match the precision of a reference price.
+ *
+ * @param price - Price to round
+ * @param markPrice - Reference price for precision
+ * @returns Formatted price string
+ */
+export function roundToMarkPricePrecision(price: number, markPrice: number): string {
+  const decimals = getDecimalPlaces(markPrice);
+  let result = price.toFixed(decimals);
+  if (decimals > 0) {
+    result = result.replace(/\.?0+$/, "");
+  }
+  return result || "0";
+}
+
 /**
  * Converts various types to a floating-point number, with safe fallbacks.
  *

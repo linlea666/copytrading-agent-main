@@ -18,12 +18,10 @@
 import type * as hl from "@nktkas/hyperliquid";
 import type { PairRiskConfig } from "../config/types.js";
 import { logger, type Logger } from "../utils/logger.js";
+import { EPSILON } from "../utils/math.js";
 import { LeaderState } from "../domain/leaderState.js";
 import { FollowerState } from "../domain/followerState.js";
 import type { MarketMetadataService } from "./marketMetadata.js";
-
-/** Minimum position size to consider non-zero */
-const EPSILON = 1e-9;
 
 /** cloid prefix for identifying mirror orders */
 const CLOID_PREFIX = "mirror";
@@ -111,6 +109,9 @@ export class OrderMirrorService {
 
   /** Whether the service has started */
   private started = false;
+
+  /** Whether the initial snapshot has been received */
+  private isInitialized = false;
 
   constructor(private readonly deps: OrderMirrorDeps) {
     this.log = deps.log ?? logger;
@@ -233,14 +234,15 @@ export class OrderMirrorService {
    * Handles orders update from WebSocket.
    */
   private async handleOrdersUpdate(orders: LeaderOrder[]): Promise<void> {
-    // First update is the snapshot
-    if (this.leaderOrders.size === 0 && orders.length > 0) {
+    // First update is the snapshot (use explicit flag instead of implicit check)
+    if (!this.isInitialized) {
       await this.handleOrdersSnapshot(orders);
+      this.isInitialized = true;
       return;
     }
 
     // Subsequent updates: detect changes
-    this.detectOrderChanges(orders);
+    await this.detectOrderChanges(orders);
   }
 
   /**
@@ -284,9 +286,12 @@ export class OrderMirrorService {
 
   /**
    * Detects order changes between current and new order list.
+   * Properly awaits all async operations to ensure correct error handling and ordering.
    */
-  private detectOrderChanges(newOrders: LeaderOrder[]): void {
+  private async detectOrderChanges(newOrders: LeaderOrder[]): Promise<void> {
     const newOrderMap = new Map(newOrders.map((o) => [o.oid, o]));
+    const placePromises: Promise<void>[] = [];
+    const cancelPromises: Promise<void>[] = [];
 
     // Detect new orders
     for (const [oid, order] of newOrderMap) {
@@ -299,7 +304,7 @@ export class OrderMirrorService {
           reduceOnly: order.reduceOnly,
           oid: order.oid,
         });
-        this.placeFollowerOrder(order);
+        placePromises.push(this.placeFollowerOrder(order));
       }
     }
 
@@ -311,11 +316,23 @@ export class OrderMirrorService {
           oid: order.oid,
           reason: "取消或成交",
         });
-        this.cancelFollowerOrder(oid);
+        cancelPromises.push(this.cancelFollowerOrder(oid));
       }
     }
 
-    // Update cache
+    // Wait for all operations to complete before updating cache
+    // This ensures state consistency
+    try {
+      await Promise.all([...placePromises, ...cancelPromises]);
+    } catch (error) {
+      this.log.error("[限价单] 批量处理订单变更时出错", {
+        error: error instanceof Error ? error.message : String(error),
+        placeCount: placePromises.length,
+        cancelCount: cancelPromises.length,
+      });
+    }
+
+    // Update cache after all operations complete
     this.leaderOrders = newOrderMap;
   }
 
@@ -408,11 +425,28 @@ export class OrderMirrorService {
           followerOid,
         });
       } else if (status && "filled" in status) {
-        // Order filled immediately
+        // Order filled immediately - still record the mapping for consistency
+        // This ensures cancelFollowerOrder won't fail when leader cancels
+        const filledOid = status.filled.oid;
+
+        this.orderMapping.set(leaderOrder.oid, {
+          leaderOid: leaderOrder.oid,
+          followerOid: filledOid,
+          cloid,
+          coin: leaderOrder.coin,
+          leaderSize,
+          followerSize,
+          createdAt: Date.now(),
+        });
+
         this.log.info("✅ [限价单] 跟单挂单立即成交", {
           coin: leaderOrder.coin,
+          side: leaderOrder.side === "B" ? "买入" : "卖出",
           price: "$" + leaderOrder.limitPx,
-          size: sizeStr,
+          leaderSize: leaderOrder.sz,
+          followerSize: sizeStr,
+          leaderOid: leaderOrder.oid,
+          followerOid: filledOid,
         });
       } else if (status && "error" in status) {
         this.log.error("❌ [限价单] 跟单挂单失败", {

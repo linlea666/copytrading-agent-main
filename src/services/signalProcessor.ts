@@ -23,11 +23,8 @@ import type { HistoryPositionTracker } from "../domain/historyTracker.js";
 import type { MarketMetadataService } from "./marketMetadata.js";
 import type { FollowerState } from "../domain/followerState.js";
 import type { LeaderState } from "../domain/leaderState.js";
-import { clamp } from "../utils/math.js";
+import { EPSILON, clamp, roundToMarkPricePrecision } from "../utils/math.js";
 import { randomUUID } from "node:crypto";
-
-/** Minimum position size to consider non-zero */
-const EPSILON = 1e-9;
 
 /** Default minimum order notional (USD) - Hyperliquid minimum is $10 */
 const DEFAULT_MIN_ORDER_NOTIONAL_USD = 15;
@@ -60,28 +57,6 @@ interface AggregatedFill {
   timestamp: number;
   crossed: boolean;
   oid: number;
-}
-
-/**
- * Determines the number of decimal places in a number's string representation.
- */
-function getDecimalPlaces(value: number): number {
-  const str = value.toString();
-  const decimalIndex = str.indexOf(".");
-  if (decimalIndex === -1) return 0;
-  return str.length - decimalIndex - 1;
-}
-
-/**
- * Rounds a price to match the precision of a reference price.
- */
-function roundToMarkPricePrecision(price: number, markPrice: number): string {
-  const decimals = getDecimalPlaces(markPrice);
-  let result = price.toFixed(decimals);
-  if (decimals > 0) {
-    result = result.replace(/\.?0+$/, "");
-  }
-  return result || "0";
 }
 
 /**

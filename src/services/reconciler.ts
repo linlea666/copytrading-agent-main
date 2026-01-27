@@ -17,40 +17,15 @@
 import type * as hl from "@nktkas/hyperliquid";
 import type { CopyTradingConfig } from "../config/index.js";
 import { logger, type Logger } from "../utils/logger.js";
+import { EPSILON, clamp, roundToMarkPricePrecision } from "../utils/math.js";
 import { LeaderState } from "../domain/leaderState.js";
 import { FollowerState } from "../domain/followerState.js";
 import type { HistoryPositionTracker } from "../domain/historyTracker.js";
 import type { MarketMetadataService } from "./marketMetadata.js";
-import { clamp } from "../utils/math.js";
 import { randomUUID } from "node:crypto";
 
 /** Default reconciliation interval: 5 minutes (reduced from 1 minute) */
 const DEFAULT_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000;
-
-/** Minimum position size to consider non-zero */
-const EPSILON = 1e-9;
-
-/**
- * Determines the number of decimal places in a number's string representation.
- */
-function getDecimalPlaces(value: number): number {
-  const str = value.toString();
-  const decimalIndex = str.indexOf(".");
-  if (decimalIndex === -1) return 0;
-  return str.length - decimalIndex - 1;
-}
-
-/**
- * Rounds a price to match the precision of a reference price.
- */
-function roundToMarkPricePrecision(price: number, markPrice: number): string {
-  const decimals = getDecimalPlaces(markPrice);
-  let result = price.toFixed(decimals);
-  if (decimals > 0) {
-    result = result.replace(/\.?0+$/, "");
-  }
-  return result || "0";
-}
 
 /**
  * Optional dependencies for fallback full close feature.
