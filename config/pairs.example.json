@@ -1,10 +1,12 @@
 {
   "environment": "mainnet",
   "logLevel": "info",
-  "reconciliationIntervalMs": 60000,
+  "reconciliationIntervalMs": 20000,
   "refreshAccountIntervalMs": 5000,
   "websocketAggregateFills": true,
   "stateDir": "./data/state",
+  "enableTradeLog": true,
+  "_comment_global": "reconciliationIntervalMs 建议设为 20000(20秒)，支持聚合模式的及时同步",
   "pairs": [
     {
       "id": "smart-whale-1",
@@ -17,16 +19,18 @@
         "maxNotionalUsd": 50000,
         "maxSlippageBps": 25,
         "inverse": false,
-        "maxPositionDeviationPercent": 5
+        "maxPositionDeviationPercent": 5,
+        "marketOrderSlippage": 0.05,
+        "boostPriceThreshold": 0.005
       },
       "minOrderNotionalUsd": 15,
       "syncDebounceMs": 300,
       "enabled": true,
       "_comment_1": "使用API钱包时: followerPrivateKey=API钱包私钥, followerAddress=主账户地址",
-      "_comment_2": "maxPositionDeviationPercent: 仓位偏离度超过此值时强制同步(防止大户跟单小户时仓位偏离过大)"
+      "_comment_2": "maxPositionDeviationPercent: 仓位偏离度超过此值时强制同步"
     },
     {
-      "id": "big-whale",
+      "id": "frequent-trader",
       "leaderAddress": "0x0987654321098765432109876543210987654321",
       "followerPrivateKey": "${FOLLOWER_2_PRIVATE_KEY}",
       "followerAddress": "0xYOUR_MAIN_ACCOUNT_ADDRESS_HERE",
@@ -36,12 +40,20 @@
         "maxNotionalUsd": 100000,
         "maxSlippageBps": 30,
         "inverse": false,
-        "maxPositionDeviationPercent": 3
+        "maxPositionDeviationPercent": 5,
+        "marketOrderSlippage": 0.05,
+        "boostPriceThreshold": 0.005
       },
       "minOrderNotionalUsd": 12,
       "syncDebounceMs": 500,
-      "enabled": false,
-      "_comment": "跟单大户时建议降低偏离度阈值(如3%)，确保仓位更紧密同步"
+      "enabled": true,
+      "enablePositionAggregation": true,
+      "reducePositionPriceThreshold": 0.01,
+      "maxPriceCheckSkipCount": 5,
+      "_comment_aggregation_1": "enablePositionAggregation: 启用仓位聚合模式，适用于频繁交易的领航员",
+      "_comment_aggregation_2": "聚合模式下：开仓/平仓立即执行，加仓/减仓由对账周期批量同步",
+      "_comment_aggregation_3": "reducePositionPriceThreshold: 减仓价格容忍度(相对于跟单者入场均价)",
+      "_comment_aggregation_4": "maxPriceCheckSkipCount: 价格不利时最大跳过次数，达到后放弃本次同步等待下次机会"
     }
   ]
 }

@@ -134,6 +134,48 @@ export interface CopyPairConfig {
 
   /** Whether this pair is enabled for copy trading */
   enabled: boolean;
+
+  // ==================== 仓位聚合模式配置 ====================
+  // 针对频繁交易的领航员，将加减仓信号延迟到对账周期批量执行
+  // 开仓和平仓信号不受影响，始终立即执行
+
+  /**
+   * 是否启用仓位聚合模式
+   * 
+   * 启用后：
+   * - 开仓/平仓信号：立即执行（不变）
+   * - 加仓/减仓信号：跳过实时执行，通过对账周期批量同步
+   * 
+   * 适用于频繁交易的领航员，可显著减少订单数量和手续费
+   * 对账间隔使用全局配置 reconciliationIntervalMs（建议设为 20000）
+   * @default false
+   */
+  enablePositionAggregation?: boolean;
+
+  /**
+   * 减仓价格容忍度（相对于跟单者持仓均价）
+   * 
+   * 减仓时检查当前价格是否有利：
+   * - 多仓减仓：当前价 >= 持仓均价 × (1 - threshold) → 执行
+   * - 空仓减仓：当前价 <= 持仓均价 × (1 + threshold) → 执行
+   * 
+   * 仅在 enablePositionAggregation = true 时生效
+   * @default 0.01 (1%)
+   */
+  reducePositionPriceThreshold?: number;
+
+  /**
+   * 价格不利时最大跳过次数
+   * 
+   * 达到此次数后放弃本次同步，清除计数，等待下一次机会
+   * - 不会强制执行
+   * - 下次对账会重新检测和判断
+   * 
+   * 设为 0 表示不检查价格，始终执行
+   * 仅在 enablePositionAggregation = true 时生效
+   * @default 5
+   */
+  maxPriceCheckSkipCount?: number;
 }
 
 /**
@@ -194,7 +236,7 @@ export interface MultiCopyTradingConfig {
 export const CONFIG_DEFAULTS = {
   environment: "mainnet" as HyperliquidEnvironment,
   logLevel: "info" as LogLevel,
-  reconciliationIntervalMs: 60_000,
+  reconciliationIntervalMs: 20_000,  // 统一对账间隔，支持聚合模式
   refreshAccountIntervalMs: 5_000,
   websocketAggregateFills: true,
   stateDir: "./data/state",
@@ -213,5 +255,9 @@ export const CONFIG_DEFAULTS = {
       marketOrderSlippage: 0.05,
       boostPriceThreshold: 0.0005,
     },
+    // 仓位聚合模式默认配置
+    enablePositionAggregation: false,
+    reducePositionPriceThreshold: 0.01,
+    maxPriceCheckSkipCount: 5,
   },
 } as const;

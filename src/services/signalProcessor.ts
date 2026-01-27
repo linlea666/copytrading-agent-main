@@ -118,6 +118,11 @@ export interface SignalProcessorDeps {
   logDir?: string;
   /** Whether to enable trade logging to files */
   enableTradeLog?: boolean;
+  /** 
+   * 是否启用仓位聚合模式
+   * 启用后，加减仓信号将被跳过，由对账器批量同步
+   */
+  enablePositionAggregation?: boolean;
 }
 
 /**
@@ -129,6 +134,7 @@ export class SignalProcessor {
   private readonly minOrderNotionalUsd: number;
   private readonly syncLeverage: boolean;
   private readonly tradeLogger: TradeLogger | null;
+  private readonly enablePositionAggregation: boolean;
   private processing = false;
 
   /** Cache of leverage settings already synced */
@@ -138,6 +144,7 @@ export class SignalProcessor {
     this.log = deps.log ?? logger;
     this.minOrderNotionalUsd = deps.minOrderNotionalUsd ?? DEFAULT_MIN_ORDER_NOTIONAL_USD;
     this.syncLeverage = deps.syncLeverage ?? true;
+    this.enablePositionAggregation = deps.enablePositionAggregation ?? false;
 
     // Initialize trade logger if enabled
     if (deps.enableTradeLog && deps.logDir) {
@@ -153,6 +160,11 @@ export class SignalProcessor {
       );
     } else {
       this.tradeLogger = null;
+    }
+
+    // Log aggregation mode status
+    if (this.enablePositionAggregation) {
+      this.log.info("📦 仓位聚合模式已启用：加减仓信号将由对账器批量同步");
     }
   }
 
@@ -338,6 +350,25 @@ export class SignalProcessor {
    * Process a single trading signal and execute the copy trade.
    */
   private async processSignal(signal: TradingSignal): Promise<void> {
+    // ========== 聚合模式判断 ==========
+    // 如果启用了聚合模式，加减仓信号跳过实时执行，由对账器批量同步
+    if (this.enablePositionAggregation) {
+      // 判断是否是加减仓（非新开仓且非完全平仓）
+      const isAddOrReduce = !signal.isNewPosition && !signal.isFullClose;
+      
+      if (isAddOrReduce) {
+        this.log.info("📦 跳过加减仓信号（聚合模式，等待对账同步）", {
+          coin: signal.coin,
+          direction: signal.direction,
+          size: signal.size.toFixed(6),
+          price: "$" + signal.price.toFixed(2),
+        });
+        this.tradeLogger?.logTradeSkipped(signal.coin, "聚合模式：等待对账同步");
+        return;
+      }
+    }
+    // ========== 聚合模式判断结束 ==========
+
     // Calculate fund ratio and copy size
     const leaderEquity = this.deps.leaderState.getMetrics().accountValueUsd;
     const followerEquity = this.deps.followerState.getMetrics().accountValueUsd;

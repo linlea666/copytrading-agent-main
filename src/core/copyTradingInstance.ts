@@ -102,6 +102,8 @@ export class CopyTradingInstance {
       pairId: pairConfig.id,
       logDir: globalConfig.stateDir,
       enableTradeLog: globalConfig.enableTradeLog ?? true,
+      // Position aggregation mode
+      enablePositionAggregation: pairConfig.enablePositionAggregation ?? false,
     });
 
     // Initialize WebSocket subscription service
@@ -140,6 +142,18 @@ export class CopyTradingInstance {
         marketOrderSlippage: pairConfig.risk.marketOrderSlippage,
       }),
     });
+
+    // Enable position aggregation mode if configured
+    if (pairConfig.enablePositionAggregation) {
+      this.reconciler.enableAggregationMode({
+        enabled: true,
+        copyRatio: pairConfig.risk.copyRatio,
+        minOrderNotionalUsd: pairConfig.minOrderNotionalUsd,
+        addPriceThreshold: pairConfig.risk.boostPriceThreshold ?? 0.005,
+        reducePriceThreshold: pairConfig.reducePositionPriceThreshold ?? 0.01,
+        maxSkipCount: pairConfig.maxPriceCheckSkipCount ?? 5,
+      });
+    }
   }
 
   /**

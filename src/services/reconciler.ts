@@ -10,6 +10,7 @@
  * - Recovery after WebSocket disconnection
  * - Periodic state verification (backup mechanism)
  * - **Fallback full close**: If leader has no position but follower does, close it
+ * - **Position aggregation mode**: Batch sync add/reduce position signals
  *
  * The fallback full close ensures position consistency even when WebSocket signals are lost.
  */
@@ -19,6 +20,7 @@ import type { CopyTradingConfig } from "../config/index.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { LeaderState } from "../domain/leaderState.js";
 import { FollowerState } from "../domain/followerState.js";
+import type { PositionSnapshot } from "../domain/types.js";
 import type { HistoryPositionTracker } from "../domain/historyTracker.js";
 import type { MarketMetadataService } from "./marketMetadata.js";
 import { clamp } from "../utils/math.js";
@@ -63,12 +65,38 @@ export interface ReconcilerFallbackDeps {
 }
 
 /**
+ * Aggregation mode configuration.
+ */
+export interface AggregationConfig {
+  /** Whether aggregation mode is enabled */
+  enabled: boolean;
+  /** Copy ratio for position sizing */
+  copyRatio: number;
+  /** Minimum order notional in USD */
+  minOrderNotionalUsd: number;
+  /** Add position price threshold (relative to leader's entry price) */
+  addPriceThreshold: number;
+  /** Reduce position price threshold (relative to follower's entry price) */
+  reducePriceThreshold: number;
+  /** Maximum times to skip due to unfavorable price (0 = no price check) */
+  maxSkipCount: number;
+}
+
+/**
  * Manages periodic reconciliation of leader and follower states.
  * Also performs fallback full close when leader has no position but follower does.
+ * 
+ * In aggregation mode, also handles batch syncing of add/reduce position signals.
  */
 export class Reconciler {
   private intervalHandle: NodeJS.Timeout | null = null;
   private fallbackDeps: ReconcilerFallbackDeps | null = null;
+  
+  /** Aggregation mode configuration */
+  private aggregationConfig: AggregationConfig | null = null;
+  
+  /** Price check skip counters (coin -> skip count) */
+  private priceCheckSkipCount = new Map<string, number>();
 
   constructor(
     private readonly infoClient: hl.InfoClient,
@@ -86,6 +114,21 @@ export class Reconciler {
   setFallbackDeps(deps: ReconcilerFallbackDeps): void {
     this.fallbackDeps = deps;
     this.log.info("Fallback full close enabled");
+  }
+
+  /**
+   * Enables aggregation mode for batch syncing add/reduce position signals.
+   * Call this after construction if aggregation mode is needed.
+   */
+  enableAggregationMode(config: AggregationConfig): void {
+    this.aggregationConfig = config;
+    this.log.info("📦 仓位聚合模式已启用（对账器）", {
+      copyRatio: config.copyRatio,
+      minOrderNotionalUsd: "$" + config.minOrderNotionalUsd,
+      addPriceThreshold: (config.addPriceThreshold * 100).toFixed(2) + "%",
+      reducePriceThreshold: (config.reducePriceThreshold * 100).toFixed(2) + "%",
+      maxSkipCount: config.maxSkipCount,
+    });
   }
 
   /**
@@ -124,6 +167,11 @@ export class Reconciler {
     // Fallback full close: check for orphaned follower positions
     if (this.fallbackDeps) {
       await this.checkAndCloseFallbackPositions(leaderPositions, followerPositions);
+    }
+
+    // Aggregation mode: sync position differences
+    if (this.aggregationConfig?.enabled && this.fallbackDeps) {
+      await this.syncPositionDifferences();
     }
   }
 
@@ -285,5 +333,342 @@ export class Reconciler {
     this.log.info("Stopping reconciler");
     clearInterval(this.intervalHandle);
     this.intervalHandle = null;
+  }
+
+  // ==================== 仓位聚合模式：差异同步 ====================
+
+  /**
+   * Syncs position differences between leader and follower.
+   * Only called when aggregation mode is enabled.
+   */
+  private async syncPositionDifferences(): Promise<void> {
+    if (!this.aggregationConfig || !this.fallbackDeps) return;
+
+    const leaderPositions = this.leaderState.getPositions();
+    const followerPositions = this.followerState.getPositions();
+    const leaderEquity = this.leaderState.getMetrics().accountValueUsd;
+    const followerEquity = this.followerState.getMetrics().accountValueUsd;
+
+    if (leaderEquity <= 0 || followerEquity <= 0) {
+      return;
+    }
+
+    const fundRatio = followerEquity / leaderEquity;
+
+    // Check each leader position for sync needs
+    for (const [coin, leaderPos] of leaderPositions) {
+      const followerPos = followerPositions.get(coin);
+      
+      await this.syncSinglePosition(
+        coin,
+        leaderPos as PositionSnapshot,
+        followerPos as PositionSnapshot | undefined,
+        fundRatio,
+      );
+    }
+  }
+
+  /**
+   * Syncs a single position between leader and follower.
+   */
+  private async syncSinglePosition(
+    coin: string,
+    leaderPos: PositionSnapshot,
+    followerPos: PositionSnapshot | undefined,
+    fundRatio: number,
+  ): Promise<void> {
+    if (!this.aggregationConfig || !this.fallbackDeps) return;
+
+    const leaderSize = leaderPos.size;
+    const followerSize = followerPos?.size ?? 0;
+
+    // Skip if leader has no position (handled by fallback full close)
+    if (Math.abs(leaderSize) <= EPSILON) {
+      return;
+    }
+
+    // Calculate target size for follower
+    const targetSize = leaderSize * fundRatio * this.aggregationConfig.copyRatio;
+    const sizeDiff = targetSize - followerSize;
+
+    // Skip if difference is negligible
+    if (Math.abs(sizeDiff) <= EPSILON) {
+      return;
+    }
+
+    const markPrice = this.fallbackDeps.metadataService.getMarkPrice(coin);
+    if (!markPrice || markPrice <= 0) {
+      return;
+    }
+
+    const diffNotional = Math.abs(sizeDiff) * markPrice;
+
+    // Skip if notional is below minimum
+    if (diffNotional < this.aggregationConfig.minOrderNotionalUsd) {
+      this.log.debug(`[聚合同步] 差异金额不足最小阈值，跳过`, {
+        coin,
+        diffNotional: "$" + diffNotional.toFixed(2),
+        minNotional: "$" + this.aggregationConfig.minOrderNotionalUsd,
+      });
+      return;
+    }
+
+    // Determine if this is add position or reduce position
+    // Add position: sizeDiff and leaderSize have same sign
+    // Reduce position: sizeDiff and leaderSize have opposite signs
+    const isAddPosition = Math.sign(sizeDiff) === Math.sign(leaderSize);
+
+    this.log.info(`📊 [聚合同步] 检测到仓位差异`, {
+      coin,
+      leaderSize: leaderSize.toFixed(6),
+      followerSize: followerSize.toFixed(6),
+      targetSize: targetSize.toFixed(6),
+      sizeDiff: sizeDiff.toFixed(6),
+      diffNotional: "$" + diffNotional.toFixed(2),
+      action: isAddPosition ? "需要加仓" : "需要减仓",
+    });
+
+    if (isAddPosition) {
+      await this.executeAggregationAddPosition(coin, sizeDiff, leaderPos, markPrice);
+    } else {
+      await this.executeAggregationReducePosition(coin, sizeDiff, followerPos!, markPrice);
+    }
+  }
+
+  /**
+   * Executes an add position order with price check.
+   * Uses leader's entry price as reference.
+   */
+  private async executeAggregationAddPosition(
+    coin: string,
+    sizeDiff: number,
+    leaderPos: PositionSnapshot,
+    markPrice: number,
+  ): Promise<void> {
+    if (!this.aggregationConfig || !this.fallbackDeps) return;
+
+    const leaderEntryPrice = leaderPos.entryPrice;
+    const threshold = this.aggregationConfig.addPriceThreshold;
+    const maxSkip = this.aggregationConfig.maxSkipCount;
+
+    // Check price if maxSkipCount > 0
+    if (maxSkip > 0) {
+      const isLong = leaderPos.size > 0;
+      let priceOk: boolean;
+
+      if (isLong) {
+        // Long add: current price should be <= leader entry × (1 + threshold)
+        priceOk = markPrice <= leaderEntryPrice * (1 + threshold);
+      } else {
+        // Short add: current price should be >= leader entry × (1 - threshold)
+        priceOk = markPrice >= leaderEntryPrice * (1 - threshold);
+      }
+
+      const skipKey = `add:${coin}`;
+      const skipCount = this.priceCheckSkipCount.get(skipKey) ?? 0;
+
+      if (!priceOk) {
+        if (skipCount < maxSkip) {
+          this.log.info(`⏭️ [聚合同步] 加仓价格不利，跳过等待下次`, {
+            coin,
+            direction: isLong ? "多仓" : "空仓",
+            leaderEntryPrice: "$" + leaderEntryPrice.toFixed(4),
+            currentPrice: "$" + markPrice.toFixed(4),
+            threshold: (threshold * 100).toFixed(2) + "%",
+            skipCount: skipCount + 1,
+            maxSkip,
+          });
+          this.priceCheckSkipCount.set(skipKey, skipCount + 1);
+          return;
+        } else {
+          // Reached max skip count, give up this sync cycle
+          this.log.info(`🚫 [聚合同步] 加仓价格持续不利，放弃本次同步`, {
+            coin,
+            skipCount,
+            reason: "等待下一次领航员操作或价格回归",
+          });
+          this.priceCheckSkipCount.delete(skipKey);
+          return;
+        }
+      }
+
+      // Price is favorable, clear skip count
+      if (skipCount > 0) {
+        this.log.info(`✅ [聚合同步] 加仓价格有利，执行同步`, {
+          coin,
+          leaderEntryPrice: "$" + leaderEntryPrice.toFixed(4),
+          currentPrice: "$" + markPrice.toFixed(4),
+        });
+      }
+      this.priceCheckSkipCount.delete(skipKey);
+    }
+
+    // Execute the add position
+    const isLong = leaderPos.size > 0;
+    const action = isLong ? "buy" : "sell";
+    await this.executePositionAdjust(coin, Math.abs(sizeDiff), action, false, "加仓");
+  }
+
+  /**
+   * Executes a reduce position order with price check.
+   * Uses follower's entry price as reference.
+   */
+  private async executeAggregationReducePosition(
+    coin: string,
+    sizeDiff: number,
+    followerPos: PositionSnapshot,
+    markPrice: number,
+  ): Promise<void> {
+    if (!this.aggregationConfig || !this.fallbackDeps) return;
+
+    const followerEntryPrice = followerPos.entryPrice;
+    const threshold = this.aggregationConfig.reducePriceThreshold;
+    const maxSkip = this.aggregationConfig.maxSkipCount;
+
+    // Check price if maxSkipCount > 0
+    if (maxSkip > 0) {
+      const isLong = followerPos.size > 0;
+      let priceOk: boolean;
+
+      if (isLong) {
+        // Long reduce (sell): current price should be >= entry × (1 - threshold)
+        priceOk = markPrice >= followerEntryPrice * (1 - threshold);
+      } else {
+        // Short reduce (buy): current price should be <= entry × (1 + threshold)
+        priceOk = markPrice <= followerEntryPrice * (1 + threshold);
+      }
+
+      const skipKey = `reduce:${coin}`;
+      const skipCount = this.priceCheckSkipCount.get(skipKey) ?? 0;
+
+      if (!priceOk) {
+        if (skipCount < maxSkip) {
+          this.log.info(`⏭️ [聚合同步] 减仓价格不利，跳过等待下次`, {
+            coin,
+            direction: isLong ? "多仓" : "空仓",
+            followerEntryPrice: "$" + followerEntryPrice.toFixed(4),
+            currentPrice: "$" + markPrice.toFixed(4),
+            threshold: (threshold * 100).toFixed(2) + "%",
+            skipCount: skipCount + 1,
+            maxSkip,
+          });
+          this.priceCheckSkipCount.set(skipKey, skipCount + 1);
+          return;
+        } else {
+          // Reached max skip count, give up this sync cycle
+          this.log.info(`🚫 [聚合同步] 减仓价格持续不利，放弃本次同步`, {
+            coin,
+            skipCount,
+            reason: "等待下一次领航员操作或价格回归",
+          });
+          this.priceCheckSkipCount.delete(skipKey);
+          return;
+        }
+      }
+
+      // Price is favorable, clear skip count
+      if (skipCount > 0) {
+        this.log.info(`✅ [聚合同步] 减仓价格有利，执行同步`, {
+          coin,
+          followerEntryPrice: "$" + followerEntryPrice.toFixed(4),
+          currentPrice: "$" + markPrice.toFixed(4),
+        });
+      }
+      this.priceCheckSkipCount.delete(skipKey);
+    }
+
+    // Execute the reduce position
+    const isLong = followerPos.size > 0;
+    const action = isLong ? "sell" : "buy";
+    await this.executePositionAdjust(coin, Math.abs(sizeDiff), action, true, "减仓");
+  }
+
+  /**
+   * Executes a position adjustment order.
+   * Reuses the order execution logic from fallback close.
+   */
+  private async executePositionAdjust(
+    coin: string,
+    size: number,
+    action: "buy" | "sell",
+    reduceOnly: boolean,
+    actionType: string,
+  ): Promise<void> {
+    if (!this.fallbackDeps) return;
+
+    const { exchangeClient, metadataService, marketOrderSlippage } = this.fallbackDeps;
+
+    try {
+      const metadata = metadataService.getByCoin(coin);
+      if (!metadata) {
+        this.log.error(`[聚合同步] 无法获取币种元数据`, { coin });
+        return;
+      }
+
+      const markPrice = metadataService.getMarkPrice(coin);
+      if (!markPrice || markPrice <= 0) {
+        this.log.error(`[聚合同步] 无法获取标记价格`, { coin });
+        return;
+      }
+
+      // Calculate slippage price
+      const slippage = marketOrderSlippage ?? 0.05;
+      const priceMultiplier = action === "buy" ? 1 + slippage : 1 - slippage;
+      const limitPrice = clamp(markPrice * priceMultiplier, markPrice * 0.5, markPrice * 2);
+      const priceStr = roundToMarkPricePrecision(limitPrice, markPrice);
+      const sizeStr = size.toFixed(metadata.sizeDecimals);
+
+      // Skip if size rounds to zero
+      if (parseFloat(sizeStr) === 0) {
+        this.log.debug(`[聚合同步] 数量取整后为零，跳过`, { coin });
+        return;
+      }
+
+      const notional = size * markPrice;
+
+      this.log.info(`📦 [聚合同步] 执行${actionType}`, {
+        coin,
+        action: action === "buy" ? "买入" : "卖出",
+        size: sizeStr,
+        notional: "$" + notional.toFixed(2),
+        price: "$" + priceStr,
+        slippage: (slippage * 100).toFixed(1) + "%",
+        reduceOnly,
+      });
+
+      const order = {
+        a: metadata.assetId,
+        b: action === "buy",
+        p: priceStr,
+        s: sizeStr,
+        r: reduceOnly,
+        t: { limit: { tif: "Ioc" as const } },
+        c: `0x${randomUUID().replace(/-/g, "").slice(0, 32)}`,
+      };
+
+      const response = await exchangeClient.order({
+        orders: [order],
+        grouping: "na",
+      });
+
+      const statuses = response.response.data.statuses;
+      const filled = statuses.filter((s) => "filled" in s || "resting" in s);
+      const errors = statuses.filter((s) => "error" in s);
+
+      if (filled.length > 0) {
+        this.log.info(`✅ [聚合同步] ${actionType}订单成功`, { coin, size: sizeStr });
+      }
+      if (errors.length > 0) {
+        this.log.warn(`❌ [聚合同步] ${actionType}订单失败`, {
+          coin,
+          errors: errors.map((e) => ("error" in e ? e.error : "unknown")),
+        });
+      }
+    } catch (error) {
+      this.log.error(`[聚合同步] ${actionType}执行失败`, {
+        coin,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 }
