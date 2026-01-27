@@ -66,6 +66,9 @@ export interface ReconcilerFallbackDeps {
 
 /**
  * Aggregation mode configuration.
+ * 
+ * 加仓：直接执行，不检查价格（目标是保持仓位比例一致）
+ * 减仓：检查价格是否有利（保护跟单者利益）
  */
 export interface AggregationConfig {
   /** Whether aggregation mode is enabled */
@@ -74,11 +77,9 @@ export interface AggregationConfig {
   copyRatio: number;
   /** Minimum order notional in USD */
   minOrderNotionalUsd: number;
-  /** Add position price threshold (relative to leader's entry price) */
-  addPriceThreshold: number;
   /** Reduce position price threshold (relative to follower's entry price) */
   reducePriceThreshold: number;
-  /** Maximum times to skip due to unfavorable price (0 = no price check) */
+  /** Maximum times to skip due to unfavorable price for reduce (0 = no price check) */
   maxSkipCount: number;
 }
 
@@ -125,9 +126,9 @@ export class Reconciler {
     this.log.info("📦 仓位聚合模式已启用（对账器）", {
       copyRatio: config.copyRatio,
       minOrderNotionalUsd: "$" + config.minOrderNotionalUsd,
-      addPriceThreshold: (config.addPriceThreshold * 100).toFixed(2) + "%",
-      reducePriceThreshold: (config.reducePriceThreshold * 100).toFixed(2) + "%",
-      maxSkipCount: config.maxSkipCount,
+      加仓: "直接执行（不检查价格）",
+      减仓价格阈值: (config.reducePriceThreshold * 100).toFixed(2) + "%",
+      减仓最大跳过次数: config.maxSkipCount,
     });
   }
 
@@ -436,74 +437,23 @@ export class Reconciler {
   }
 
   /**
-   * Executes an add position order with price check.
-   * Uses leader's entry price as reference.
+   * Executes an add position order.
+   * 
+   * 加仓不检查价格，直接执行。
+   * 理由：
+   * 1. 聚合模式的目标是保持仓位比例一致，不是优化入场价格
+   * 2. 领航员的均价是多次交易的累积结果，不适合作为加仓的价格参考
+   * 3. 延迟是不可避免的，严格的价格检查会导致仓位永远无法同步
    */
   private async executeAggregationAddPosition(
     coin: string,
     sizeDiff: number,
     leaderPos: PositionSnapshot,
-    markPrice: number,
+    _markPrice: number,
   ): Promise<void> {
     if (!this.aggregationConfig || !this.fallbackDeps) return;
 
-    const leaderEntryPrice = leaderPos.entryPrice;
-    const threshold = this.aggregationConfig.addPriceThreshold;
-    const maxSkip = this.aggregationConfig.maxSkipCount;
-
-    // Check price if maxSkipCount > 0
-    if (maxSkip > 0) {
-      const isLong = leaderPos.size > 0;
-      let priceOk: boolean;
-
-      if (isLong) {
-        // Long add: current price should be <= leader entry × (1 + threshold)
-        priceOk = markPrice <= leaderEntryPrice * (1 + threshold);
-      } else {
-        // Short add: current price should be >= leader entry × (1 - threshold)
-        priceOk = markPrice >= leaderEntryPrice * (1 - threshold);
-      }
-
-      const skipKey = `add:${coin}`;
-      const skipCount = this.priceCheckSkipCount.get(skipKey) ?? 0;
-
-      if (!priceOk) {
-        if (skipCount < maxSkip) {
-          this.log.info(`⏭️ [聚合同步] 加仓价格不利，跳过等待下次`, {
-            coin,
-            direction: isLong ? "多仓" : "空仓",
-            leaderEntryPrice: "$" + leaderEntryPrice.toFixed(4),
-            currentPrice: "$" + markPrice.toFixed(4),
-            threshold: (threshold * 100).toFixed(2) + "%",
-            skipCount: skipCount + 1,
-            maxSkip,
-          });
-          this.priceCheckSkipCount.set(skipKey, skipCount + 1);
-          return;
-        } else {
-          // Reached max skip count, give up this sync cycle
-          this.log.info(`🚫 [聚合同步] 加仓价格持续不利，放弃本次同步`, {
-            coin,
-            skipCount,
-            reason: "等待下一次领航员操作或价格回归",
-          });
-          this.priceCheckSkipCount.delete(skipKey);
-          return;
-        }
-      }
-
-      // Price is favorable, clear skip count
-      if (skipCount > 0) {
-        this.log.info(`✅ [聚合同步] 加仓价格有利，执行同步`, {
-          coin,
-          leaderEntryPrice: "$" + leaderEntryPrice.toFixed(4),
-          currentPrice: "$" + markPrice.toFixed(4),
-        });
-      }
-      this.priceCheckSkipCount.delete(skipKey);
-    }
-
-    // Execute the add position
+    // Execute the add position directly (no price check)
     const isLong = leaderPos.size > 0;
     const action = isLong ? "buy" : "sell";
     await this.executePositionAdjust(coin, Math.abs(sizeDiff), action, false, "加仓");

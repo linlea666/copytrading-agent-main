@@ -52,8 +52,9 @@
       "maxPriceCheckSkipCount": 5,
       "_comment_aggregation_1": "enablePositionAggregation: 启用仓位聚合模式，适用于频繁交易的领航员",
       "_comment_aggregation_2": "聚合模式下：开仓/平仓立即执行，加仓/减仓由对账周期批量同步",
-      "_comment_aggregation_3": "reducePositionPriceThreshold: 减仓价格容忍度(相对于跟单者入场均价)",
-      "_comment_aggregation_4": "maxPriceCheckSkipCount: 价格不利时最大跳过次数，达到后放弃本次同步等待下次机会"
+      "_comment_aggregation_3": "加仓：直接执行，不检查价格（目标是保持仓位比例一致）",
+      "_comment_aggregation_4": "减仓：检查价格是否有利，reducePositionPriceThreshold 为容忍度(相对于跟单者入场均价)",
+      "_comment_aggregation_5": "maxPriceCheckSkipCount: 减仓价格不利时最大跳过次数，达到后放弃本次同步等待下次机会"
     }
   ]
 }

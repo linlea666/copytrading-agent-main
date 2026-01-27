@@ -149,7 +149,8 @@ export class CopyTradingInstance {
         enabled: true,
         copyRatio: pairConfig.risk.copyRatio,
         minOrderNotionalUsd: pairConfig.minOrderNotionalUsd,
-        addPriceThreshold: pairConfig.risk.boostPriceThreshold ?? 0.005,
+        // 加仓：直接执行，不检查价格
+        // 减仓：检查价格是否有利
         reducePriceThreshold: pairConfig.reducePositionPriceThreshold ?? 0.01,
         maxSkipCount: pairConfig.maxPriceCheckSkipCount ?? 5,
       });
