@@ -24,7 +24,7 @@ import type * as hl from "@nktkas/hyperliquid";
 import type { UserFillsEvent } from "@nktkas/hyperliquid/api/subscription";
 import type { PairRiskConfig } from "../config/types.js";
 import { logger, type Logger } from "../utils/logger.js";
-import { EPSILON, clamp, roundToMarkPricePrecision, formatTimestamp } from "../utils/math.js";
+import { EPSILON, clamp, roundToMarkPricePrecision } from "../utils/math.js";
 import { LeaderState } from "../domain/leaderState.js";
 import { FollowerState } from "../domain/followerState.js";
 import type { HistoryPositionTracker } from "../domain/historyTracker.js";
@@ -465,17 +465,27 @@ export class HybridModeService {
       });
     }
 
+    // Collect oids to cleanup before updating leaderOrders
+    const oidsToCleanup: number[] = [];
+    for (const [oid] of this.leaderOrders) {
+      if (!newOrderMap.has(oid)) {
+        oidsToCleanup.push(oid);
+      }
+    }
+
     this.leaderOrders = newOrderMap;
 
     // Cleanup old tracked oids that are no longer in orders
-    // Keep them for 30 seconds to handle race conditions
-    setTimeout(() => {
-      for (const oid of this.trackedLimitOids) {
-        if (!newOrderMap.has(oid) && !this.limitOrderMapping.has(oid)) {
-          this.trackedLimitOids.delete(oid);
+    // Keep them for 30 seconds to handle race conditions with userFills
+    if (oidsToCleanup.length > 0) {
+      setTimeout(() => {
+        for (const oid of oidsToCleanup) {
+          if (!this.limitOrderMapping.has(oid)) {
+            this.trackedLimitOids.delete(oid);
+          }
         }
-      }
-    }, 30000);
+      }, 30000);
+    }
   }
 
   /**
@@ -484,6 +494,17 @@ export class HybridModeService {
   private async placeFollowerLimitOrder(leaderOrder: LeaderOrder): Promise<void> {
     if (this.limitOrderMapping.has(leaderOrder.oid)) {
       return;
+    }
+
+    // Check historical position filter
+    if (this.deps.historyTracker) {
+      const leaderPos = this.deps.leaderState.getPosition(leaderOrder.coin);
+      const currentSize = leaderPos?.size ?? 0;
+      const canCopy = this.deps.historyTracker.canCopy(leaderOrder.coin, currentSize);
+      if (!canCopy) {
+        this.log.debug("[混合] 跳过历史仓位的限价单", { coin: leaderOrder.coin });
+        return;
+      }
     }
 
     // Calculate follower size
