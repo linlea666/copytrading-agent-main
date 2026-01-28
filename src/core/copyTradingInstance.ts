@@ -151,7 +151,7 @@ export class CopyTradingInstance {
       this.log,
     );
 
-    // Enable fallback full close feature
+    // Enable fallback full close feature (and limit order cleanup for smart order mode)
     this.reconciler.setFallbackDeps({
       exchangeClient: clients.exchangeClient,
       metadataService: sharedMetadata,
@@ -159,6 +159,8 @@ export class CopyTradingInstance {
       ...(pairConfig.risk.marketOrderSlippage !== undefined && {
         marketOrderSlippage: pairConfig.risk.marketOrderSlippage,
       }),
+      // Smart order mode: enable limit order cleanup
+      enableSmartOrder: this.isSmartOrderMode,
     });
   }
 

@@ -10,6 +10,7 @@
  * - Recovery after WebSocket disconnection
  * - Periodic state verification (backup mechanism)
  * - **Fallback full close**: If leader has no position but follower does, close it
+ * - **Limit order cleanup**: Cancel orphaned limit orders when leader has no position
  *
  * The fallback full close ensures position consistency even when WebSocket signals are lost.
  */
@@ -35,6 +36,11 @@ export interface ReconcilerFallbackDeps {
   metadataService: MarketMetadataService;
   historyTracker: HistoryPositionTracker;
   marketOrderSlippage?: number;
+  /**
+   * 是否启用智能订单模式
+   * 启用时会在对账时清理孤立的限价单（领航员无仓位时取消跟单者该币种的限价单）
+   */
+  enableSmartOrder?: boolean;
 }
 
 /**
@@ -99,6 +105,11 @@ export class Reconciler {
     // Fallback full close: check for orphaned follower positions
     if (this.fallbackDeps) {
       await this.checkAndCloseFallbackPositions(leaderPositions, followerPositions);
+
+      // Smart order mode: cleanup orphaned limit orders
+      if (this.fallbackDeps.enableSmartOrder) {
+        await this.cleanupOrphanedLimitOrders(leaderPositions);
+      }
     }
   }
 
@@ -130,6 +141,82 @@ export class Reconciler {
 
         await this.executeFallbackClose(coin, followerSize);
       }
+    }
+  }
+
+  /**
+   * Cleans up orphaned limit orders (Smart Order Mode).
+   * Cancels follower's limit orders for coins where leader has no position.
+   */
+  private async cleanupOrphanedLimitOrders(
+    leaderPositions: ReadonlyMap<string, { size: number }>,
+  ): Promise<void> {
+    if (!this.fallbackDeps) return;
+
+    const { exchangeClient, metadataService } = this.fallbackDeps;
+
+    try {
+      // Get follower's open orders
+      const openOrders = await this.infoClient.openOrders({ user: this.followerAddress });
+
+      if (!openOrders || openOrders.length === 0) {
+        return;
+      }
+
+      // Find orders for coins where leader has no position
+      const ordersToCancel: Array<{ a: number; o: number }> = [];
+
+      for (const order of openOrders) {
+        const coin = order.coin;
+        const leaderPos = leaderPositions.get(coin);
+        const leaderSize = leaderPos?.size ?? 0;
+
+        // Leader has no position for this coin → cancel the limit order
+        if (Math.abs(leaderSize) <= EPSILON) {
+          const metadata = metadataService.getByCoin(coin);
+          if (metadata) {
+            ordersToCancel.push({ a: metadata.assetId, o: order.oid });
+            this.log.info(`🧹 [限价单清理] 准备取消孤立限价单`, {
+              coin,
+              oid: order.oid,
+              side: order.side === "B" ? "买" : "卖",
+              size: order.sz,
+              price: "$" + order.limitPx,
+              reason: "领航员已无该币种仓位",
+            });
+          }
+        }
+      }
+
+      // Cancel orders in batch
+      if (ordersToCancel.length > 0) {
+        try {
+          const response = await exchangeClient.cancel({ cancels: ordersToCancel });
+
+          const statuses = response.response.data.statuses;
+          const successCount = statuses.filter((s) => s === "success").length;
+          const errorCount = statuses.length - successCount;
+
+          this.log.info(`✅ [限价单清理] 取消完成`, {
+            total: ordersToCancel.length,
+            success: successCount,
+            failed: errorCount,
+          });
+
+          if (errorCount > 0) {
+            const errors = statuses.filter((s) => s !== "success");
+            this.log.warn(`⚠️ [限价单清理] 部分取消失败`, { errors });
+          }
+        } catch (cancelError) {
+          this.log.error(`[限价单清理] 取消订单失败`, {
+            error: cancelError instanceof Error ? cancelError.message : String(cancelError),
+          });
+        }
+      }
+    } catch (error) {
+      this.log.error(`[限价单清理] 获取未成交订单失败`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
