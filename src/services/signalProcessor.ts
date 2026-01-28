@@ -473,12 +473,12 @@ export class SignalProcessor {
   private determineAction(signal: TradingSignal, followerSize: number): CopyAction | null {
     const { direction, coin, price } = signal;
 
-    // 判断是否使用限价单（智能订单模式：加仓/减仓用限价单）
-    const shouldUseLimitOrder = this.enableSmartOrder && this.isAddReduceAction(signal);
-
     // Get current follower position
     const followerPos = this.deps.followerState.getPosition(coin);
     const currentFollowerSize = followerPos?.size ?? 0;
+
+    // 用于追踪最终操作是否为真正的加仓/减仓（而非全平）
+    let isActualAddReduce = false;
 
     let action: "buy" | "sell";
     let reduceOnly = false;
@@ -488,12 +488,24 @@ export class SignalProcessor {
     switch (direction) {
       case "Open Long":
         action = "buy";
-        description = signal.isNewPosition ? "🟢 新开多仓" : "🟢 加多仓";
+        if (signal.isNewPosition) {
+          description = "🟢 新开多仓";
+          isActualAddReduce = false;  // 新开仓用市价单
+        } else {
+          description = "🟢 加多仓";
+          isActualAddReduce = true;   // 加仓用限价单
+        }
         break;
 
       case "Open Short":
         action = "sell";
-        description = signal.isNewPosition ? "🔴 新开空仓" : "🔴 加空仓";
+        if (signal.isNewPosition) {
+          description = "🔴 新开空仓";
+          isActualAddReduce = false;  // 新开仓用市价单
+        } else {
+          description = "🔴 加空仓";
+          isActualAddReduce = true;   // 加仓用限价单
+        }
         break;
 
       case "Close Long":
@@ -514,6 +526,7 @@ export class SignalProcessor {
             actualSize = Math.abs(currentFollowerSize);
             description = "⬜ 平空仓(领航员已无仓位-方向修正)";
           }
+          isActualAddReduce = false;  // 兜底全平用市价单
           break;
         }
 
@@ -549,10 +562,12 @@ export class SignalProcessor {
           // 领航员完全平仓或减仓比例 >= 99% → 跟单者也平全部
           actualSize = currentFollowerSize;
           description = "⬜ 平多仓";
+          isActualAddReduce = false;  // 全平用市价单
         } else if (longReduceNotional >= this.minOrderNotionalUsd) {
           // 减仓金额足够 → 按比例减仓
           actualSize = longReduceSize;
           description = "🟡 减多仓";
+          isActualAddReduce = true;   // 减仓用限价单
         } else if (longPositionNotional >= longBoostTarget) {
           // 减仓金额不足但仓位够大，检查价格是否有利再决定是否提升
           const longMarkPrice = this.deps.metadataService.getMarkPrice(coin) ?? price;
@@ -582,6 +597,7 @@ export class SignalProcessor {
           // 价格有利或可接受，提升减仓到 $11
           actualSize = longBoostTarget / price;
           description = "🟡 减多仓(提升到最小金额)";
+          isActualAddReduce = true;   // 减仓用限价单
           this.log.info(`✅ 减仓价格有利，执行提升`, {
             coin,
             leaderPrice: "$" + price.toFixed(4),
@@ -593,6 +609,7 @@ export class SignalProcessor {
           // 仓位太小，直接平全部
           actualSize = currentFollowerSize;
           description = "⬜ 平多仓(仓位不足最小金额)";
+          isActualAddReduce = false;  // 全平用市价单
         }
         break;
 
@@ -614,6 +631,7 @@ export class SignalProcessor {
             actualSize = currentFollowerSize;
             description = "⬜ 平多仓(领航员已无仓位-方向修正)";
           }
+          isActualAddReduce = false;  // 兜底全平用市价单
           break;
         }
 
@@ -650,10 +668,12 @@ export class SignalProcessor {
           // 领航员完全平仓或减仓比例 >= 99% → 跟单者也平全部
           actualSize = absFollowerSize;
           description = "⬜ 平空仓";
+          isActualAddReduce = false;  // 全平用市价单
         } else if (shortReduceNotional >= this.minOrderNotionalUsd) {
           // 减仓金额足够 → 按比例减仓
           actualSize = shortReduceSize;
           description = "🟡 减空仓";
+          isActualAddReduce = true;   // 减仓用限价单
         } else if (shortPositionNotional >= shortBoostTarget) {
           // 减仓金额不足但仓位够大，检查价格是否有利再决定是否提升
           const shortMarkPrice = this.deps.metadataService.getMarkPrice(coin) ?? price;
@@ -683,6 +703,7 @@ export class SignalProcessor {
           // 价格有利或可接受，提升减仓到 $11
           actualSize = shortBoostTarget / price;
           description = "🟡 减空仓(提升到最小金额)";
+          isActualAddReduce = true;   // 减仓用限价单
           this.log.info(`✅ 减仓价格有利，执行提升`, {
             coin,
             leaderPrice: "$" + price.toFixed(4),
@@ -694,6 +715,7 @@ export class SignalProcessor {
           // 仓位太小，直接平全部
           actualSize = absFollowerSize;
           description = "⬜ 平空仓(仓位不足最小金额)";
+          isActualAddReduce = false;  // 全平用市价单
         }
         break;
 
@@ -715,6 +737,7 @@ export class SignalProcessor {
           actualSize = followerSize;
           description = "🔴 新开空仓";
         }
+        isActualAddReduce = false;  // 反向开仓用市价单
         break;
 
       // 反向开仓：空转多 (买入平空 + 开多)
@@ -735,12 +758,16 @@ export class SignalProcessor {
           actualSize = followerSize;
           description = "🟢 新开多仓";
         }
+        isActualAddReduce = false;  // 反向开仓用市价单
         break;
 
       default:
         this.log.warn("Unknown direction", { direction });
         return null;
     }
+
+    // 智能订单模式：只有真正的加仓/减仓才使用限价单
+    const shouldUseLimitOrder = this.enableSmartOrder && isActualAddReduce;
 
     return {
       coin,
@@ -751,33 +778,6 @@ export class SignalProcessor {
       description,
       useLimitOrder: shouldUseLimitOrder,
     };
-  }
-
-  /**
-   * 判断是否是加仓/减仓操作（非新开仓、非全平仓、非反向）
-   * 这些操作在智能订单模式下使用限价单
-   */
-  private isAddReduceAction(signal: TradingSignal): boolean {
-    const { direction, isNewPosition, isFullClose } = signal;
-
-    // 新开仓 → 市价单（确保及时成交）
-    if (isNewPosition) {
-      return false;
-    }
-
-    // 全平仓 → 市价单（确保完全退出）
-    if (isFullClose) {
-      return false;
-    }
-
-    // 反向开仓 → 市价单（重要操作）
-    if (direction === "Long > Short" || direction === "Short > Long") {
-      return false;
-    }
-
-    // 加仓（Open Long/Short 但 isNewPosition=false）→ 限价单
-    // 减仓（Close Long/Short 但 isFullClose=false）→ 限价单
-    return true;
   }
 
   /**
