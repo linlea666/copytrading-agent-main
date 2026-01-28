@@ -10,16 +10,18 @@
  *
  * Two modes are supported:
  * 1. Normal mode (default): Subscribe to userFills, execute IOC market orders
- * 2. Order mirror mode: Subscribe to openOrders, execute GTC limit orders
+ * 2. Hybrid mode: Subscribe to both openOrders and userFills with intelligent deduplication
+ *    - Limit orders: mirror with GTC limit orders (Maker fees)
+ *    - Market orders: follow with IOC market orders (real-time)
  *
  * Trading Flow (Normal mode):
  * 1. WebSocket receives leader's fill events
  * 2. SignalProcessor processes fills and executes copy trades
  * 3. Reconciler periodically syncs state
  *
- * Trading Flow (Order mirror mode):
- * 1. WebSocket receives leader's open orders
- * 2. OrderMirrorService mirrors orders with same price
+ * Trading Flow (Hybrid mode):
+ * 1. WebSocket receives both openOrders and userFills
+ * 2. HybridModeService handles deduplication and execution
  * 3. Reconciler periodically syncs state
  */
 
@@ -31,7 +33,7 @@ import { HistoryPositionTracker } from "../domain/historyTracker.js";
 import { MarketMetadataService } from "../services/marketMetadata.js";
 import { SignalProcessor } from "../services/signalProcessor.js";
 import { SubscriptionService } from "../services/subscriptions.js";
-import { OrderMirrorService } from "../services/orderMirror.js";
+import { HybridModeService } from "../services/hybridMode.js";
 import { Reconciler } from "../services/reconciler.js";
 import { createInstanceLogger } from "../utils/instanceLogger.js";
 import { logger, type Logger } from "../utils/logger.js";
@@ -61,15 +63,15 @@ export class CopyTradingInstance {
   private readonly reconciler: Reconciler;
   private readonly log: Logger;
 
-  // Normal mode components (mutually exclusive with order mirror)
+  // Normal mode components (mutually exclusive with hybrid mode)
   private readonly signalProcessor?: SignalProcessor;
   private readonly subscriptions?: SubscriptionService;
 
-  // Order mirror mode component
-  private readonly orderMirror?: OrderMirrorService;
+  // Hybrid mode component (dual subscription + deduplication)
+  private readonly hybridService?: HybridModeService;
 
-  /** Whether order mirror mode is enabled */
-  private readonly isOrderMirrorMode: boolean;
+  /** Whether hybrid mode is enabled */
+  private readonly isHybridMode: boolean;
 
   private status: InstanceStatus = "created";
 
@@ -103,14 +105,14 @@ export class CopyTradingInstance {
     );
 
     // Determine mode
-    this.isOrderMirrorMode = pairConfig.enableOrderMirror ?? false;
+    this.isHybridMode = pairConfig.enableHybridMode ?? false;
 
-    if (this.isOrderMirrorMode) {
-      // ==================== Order Mirror Mode ====================
-      // Subscribe to leader's openOrders, mirror with GTC limit orders
-      this.log.info("📋 配置为限价单镜像模式");
+    if (this.isHybridMode) {
+      // ==================== Hybrid Mode ====================
+      // Subscribe to both openOrders and userFills with intelligent deduplication
+      this.log.info("🔀 配置为混合模式（双订阅+智能去重）");
 
-      this.orderMirror = new OrderMirrorService({
+      this.hybridService = new HybridModeService({
         subscriptionClient: clients.subscriptionClient,
         exchangeClient: clients.exchangeClient,
         infoClient: clients.infoClient,
@@ -121,7 +123,11 @@ export class CopyTradingInstance {
         metadataService: sharedMetadata,
         risk: pairConfig.risk,
         minOrderNotionalUsd: pairConfig.minOrderNotionalUsd,
+        historyTracker: this.historyTracker,
+        fillAggregationWindowMs: pairConfig.hybridConfig?.fillAggregationWindowMs,
         pairId: pairConfig.id,
+        logDir: globalConfig.stateDir,
+        enableTradeLog: globalConfig.enableTradeLog ?? true,
         log: this.log,
       });
     } else {
@@ -284,10 +290,10 @@ export class CopyTradingInstance {
       }
 
       // 4. Start appropriate service based on mode
-      if (this.isOrderMirrorMode) {
-        // Order mirror mode: subscribe to openOrders
-        await this.orderMirror!.start();
-        this.log.info("📡 监听领航员挂单中（限价单镜像模式）...");
+      if (this.isHybridMode) {
+        // Hybrid mode: subscribe to both openOrders and userFills
+        await this.hybridService!.start();
+        this.log.info("📡 监听领航员信号中（混合模式：限价单+市价单）...");
       } else {
         // Normal mode: subscribe to userFills
         await this.subscriptions!.start();
@@ -299,7 +305,7 @@ export class CopyTradingInstance {
 
       this.status = "running";
       this.log.info("✅ Copy trading instance started successfully", {
-        mode: this.isOrderMirrorMode ? "限价单镜像" : "正常跟单",
+        mode: this.isHybridMode ? "混合模式" : "正常跟单",
       });
     } catch (error) {
       this.status = "error";
@@ -323,9 +329,9 @@ export class CopyTradingInstance {
 
     try {
       // Stop appropriate service based on mode
-      if (this.isOrderMirrorMode) {
-        await this.orderMirror?.stop().catch((error) => {
-          this.log.error("Error stopping order mirror", { error });
+      if (this.isHybridMode) {
+        await this.hybridService?.stop().catch((error) => {
+          this.log.error("Error stopping hybrid service", { error });
         });
       } else {
         await this.subscriptions?.stop().catch((error) => {

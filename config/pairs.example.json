@@ -30,7 +30,7 @@
       "_comment_2": "使用API钱包时: followerPrivateKey=API钱包私钥, followerAddress=主账户地址"
     },
     {
-      "id": "limit-order-trader",
+      "id": "hybrid-mode-trader",
       "leaderAddress": "0x0987654321098765432109876543210987654321",
       "followerPrivateKey": "${FOLLOWER_2_PRIVATE_KEY}",
       "followerAddress": "0xYOUR_MAIN_ACCOUNT_ADDRESS_HERE",
@@ -47,12 +47,16 @@
       "minOrderNotionalUsd": 12,
       "syncDebounceMs": 500,
       "enabled": true,
-      "enableOrderMirror": true,
-      "_comment_mirror_1": "enableOrderMirror: 启用限价单镜像模式",
-      "_comment_mirror_2": "监听领航员的挂单（openOrders），使用相同价格挂限价单",
-      "_comment_mirror_3": "适用于主要使用限价单的领航员，可降低手续费（Maker费率）",
-      "_comment_mirror_4": "注意：如果领航员使用市价单，本模式无法捕获",
-      "_comment_mirror_5": "重启后会自动恢复映射关系（通过cloid追溯）"
+      "enableHybridMode": true,
+      "hybridConfig": {
+        "fillAggregationWindowMs": 500
+      },
+      "_comment_hybrid_1": "enableHybridMode: 启用混合模式（双订阅+智能去重）",
+      "_comment_hybrid_2": "同时监听 openOrders（限价单）和 userFills（成交）",
+      "_comment_hybrid_3": "限价单 → 跟单使用 GTC 限价单（享受 Maker 费率）",
+      "_comment_hybrid_4": "市价单 → 跟单使用 IOC 市价单（实时跟单）",
+      "_comment_hybrid_5": "通过 oid 智能去重，避免重复跟单",
+      "_comment_hybrid_6": "适用于混合使用限价单和市价单的领航员"
     }
   ]
 }

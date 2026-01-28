@@ -101,8 +101,12 @@ function normalizePairConfig(pair: Partial<CopyPairConfig>, index: number): Copy
     minOrderNotionalUsd: pair.minOrderNotionalUsd ?? CONFIG_DEFAULTS.pair.minOrderNotionalUsd,
     syncDebounceMs: pair.syncDebounceMs ?? CONFIG_DEFAULTS.pair.syncDebounceMs,
     enabled: pair.enabled ?? CONFIG_DEFAULTS.pair.enabled,
-    // 限价单镜像模式配置
-    enableOrderMirror: pair.enableOrderMirror ?? CONFIG_DEFAULTS.pair.enableOrderMirror,
+    // 混合模式配置
+    enableHybridMode: pair.enableHybridMode ?? CONFIG_DEFAULTS.pair.enableHybridMode,
+    hybridConfig: pair.hybridConfig ? {
+      fillAggregationWindowMs: pair.hybridConfig.fillAggregationWindowMs 
+        ?? CONFIG_DEFAULTS.pair.hybridConfig.fillAggregationWindowMs,
+    } : undefined,
   };
 }
 

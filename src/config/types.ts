@@ -135,20 +135,40 @@ export interface CopyPairConfig {
   /** Whether this pair is enabled for copy trading */
   enabled: boolean;
 
-  // ==================== 限价单镜像模式配置 ====================
+  // ==================== 混合模式配置（双订阅+智能去重） ====================
 
   /**
-   * 是否启用限价单镜像模式
+   * 是否启用混合模式（Hybrid Mode）
    * 
-   * 启用后：
-   * - 订阅领航员的 openOrders（挂单）而非 userFills（成交）
-   * - 跟单者使用 GTC 限价单跟随领航员挂单价格
-   * - 适用于主要使用限价单的领航员，可降低手续费（Maker 费率）
+   * 混合模式同时订阅 openOrders（限价单挂单）和 userFills（成交信号）：
+   * - 领航员挂限价单 → 跟单者也挂限价单（享受 Maker 费率）
+   * - 领航员市价单成交 → 跟单者使用市价单跟随（实时跟单）
+   * - 通过 oid 智能去重，避免重复跟单
    * 
-   * 注意：如果领航员使用市价单，本模式无法捕获
+   * 优点：
+   * - 限价单享受 Maker 低费率
+   * - 市价单实时跟随不延迟
+   * - 100% 捕获率（限价单+市价单都能跟）
+   * 
+   * 适用场景：
+   * - 领航员混合使用限价单和市价单
+   * - 希望优化手续费同时保证实时性
+   * 
    * @default false
    */
-  enableOrderMirror?: boolean;
+  enableHybridMode?: boolean;
+
+  /**
+   * 混合模式专用配置
+   */
+  hybridConfig?: {
+    /**
+     * Fill 聚合窗口（毫秒）
+     * 同一订单的多笔成交在此窗口内聚合为一笔跟单
+     * @default 500
+     */
+    fillAggregationWindowMs?: number | undefined;
+  } | undefined;
 }
 
 /**
@@ -228,7 +248,10 @@ export const CONFIG_DEFAULTS = {
       marketOrderSlippage: 0.05,
       boostPriceThreshold: 0.0005,
     },
-    // 限价单镜像模式默认配置
-    enableOrderMirror: false,
+    // 混合模式默认配置
+    enableHybridMode: false,
+    hybridConfig: {
+      fillAggregationWindowMs: 500,
+    },
   },
 } as const;
