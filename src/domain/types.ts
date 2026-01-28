@@ -61,6 +61,12 @@ export interface CopyAction {
   reduceOnly: boolean;
   /** Human-readable description of the action */
   description: string;
+  /**
+   * 是否使用限价单（智能订单模式）
+   * - true: 使用 GTC 限价单（Maker 费率）
+   * - false/undefined: 使用 IOC 市价单（Taker 费率）
+   */
+  useLimitOrder?: boolean;
 }
 
 /** Leverage mode type */

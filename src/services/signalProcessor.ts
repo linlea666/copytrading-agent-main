@@ -93,6 +93,11 @@ export interface SignalProcessorDeps {
   logDir?: string;
   /** Whether to enable trade logging to files */
   enableTradeLog?: boolean;
+  /**
+   * 是否启用智能订单模式
+   * 启用后：新开仓/平仓/反向用市价单，加仓/减仓用限价单
+   */
+  enableSmartOrder?: boolean;
 }
 
 /**
@@ -104,6 +109,7 @@ export class SignalProcessor {
   private readonly minOrderNotionalUsd: number;
   private readonly syncLeverage: boolean;
   private readonly tradeLogger: TradeLogger | null;
+  private readonly enableSmartOrder: boolean;
   private processing = false;
 
   /** Cache of leverage settings already synced */
@@ -113,6 +119,12 @@ export class SignalProcessor {
     this.log = deps.log ?? logger;
     this.minOrderNotionalUsd = deps.minOrderNotionalUsd ?? DEFAULT_MIN_ORDER_NOTIONAL_USD;
     this.syncLeverage = deps.syncLeverage ?? true;
+    this.enableSmartOrder = deps.enableSmartOrder ?? false;
+
+    // Log mode
+    if (this.enableSmartOrder) {
+      this.log.info("💡 智能订单模式已启用：加仓/减仓使用限价单(Maker费率)");
+    }
 
     // Initialize trade logger if enabled
     if (deps.enableTradeLog && deps.logDir) {
@@ -456,9 +468,13 @@ export class SignalProcessor {
 
   /**
    * Determine the copy action based on signal direction.
+   * In smart order mode, add/reduce positions use limit orders (Maker fee).
    */
   private determineAction(signal: TradingSignal, followerSize: number): CopyAction | null {
     const { direction, coin, price } = signal;
+
+    // 判断是否使用限价单（智能订单模式：加仓/减仓用限价单）
+    const shouldUseLimitOrder = this.enableSmartOrder && this.isAddReduceAction(signal);
 
     // Get current follower position
     const followerPos = this.deps.followerState.getPosition(coin);
@@ -733,12 +749,43 @@ export class SignalProcessor {
       price,
       reduceOnly,
       description,
+      useLimitOrder: shouldUseLimitOrder,
     };
   }
 
   /**
+   * 判断是否是加仓/减仓操作（非新开仓、非全平仓、非反向）
+   * 这些操作在智能订单模式下使用限价单
+   */
+  private isAddReduceAction(signal: TradingSignal): boolean {
+    const { direction, isNewPosition, isFullClose } = signal;
+
+    // 新开仓 → 市价单（确保及时成交）
+    if (isNewPosition) {
+      return false;
+    }
+
+    // 全平仓 → 市价单（确保完全退出）
+    if (isFullClose) {
+      return false;
+    }
+
+    // 反向开仓 → 市价单（重要操作）
+    if (direction === "Long > Short" || direction === "Short > Long") {
+      return false;
+    }
+
+    // 加仓（Open Long/Short 但 isNewPosition=false）→ 限价单
+    // 减仓（Close Long/Short 但 isFullClose=false）→ 限价单
+    return true;
+  }
+
+  /**
    * Execute a copy action by placing an order.
-   * Uses mid price (order book midpoint) for execution, matching official SDK behavior.
+   * 
+   * Order types:
+   * - Market order (IOC): For new positions, full closes, reversals
+   * - Limit order (GTC): For add/reduce positions in smart order mode
    */
   private async executeAction(action: CopyAction): Promise<void> {
     const metadata = this.deps.metadataService.getByCoin(action.coin);
@@ -747,22 +794,10 @@ export class SignalProcessor {
       return;
     }
 
-    // 刷新中间价以获取最新订单簿价格（与官方 SDK 一致）
+    // 刷新中间价以获取最新订单簿价格
     await this.deps.metadataService.refreshMidPrices();
 
-    // 优先使用中间价（订单簿中点），回退到标记价格，最后使用信号价格
-    const executionPrice = this.deps.metadataService.getExecutionPrice(action.coin) ?? action.price;
-    const markPrice = this.deps.metadataService.getMarkPrice(action.coin) ?? executionPrice;
-
-    // 从配置获取滑点，默认 5%（与官方 SDK 一致）
-    const slippage = this.deps.risk.marketOrderSlippage ?? 0.05;
-    
-    // 市价单 = 激进限价单 + IoC（与官方 SDK 实现一致）
-    // 使用 Ioc (Immediate or Cancel) 确保立即成交或取消
-    const priceMultiplier = action.action === "buy" ? 1 + slippage : 1 - slippage;
-    const limitPrice = clamp(executionPrice * priceMultiplier, executionPrice * 0.5, executionPrice * 2);
-    const priceStr = roundToMarkPricePrecision(limitPrice, markPrice);
-
+    const markPrice = this.deps.metadataService.getMarkPrice(action.coin) ?? action.price;
     const sizeStr = action.size.toFixed(metadata.sizeDecimals);
 
     // Skip if size rounds to zero
@@ -770,6 +805,35 @@ export class SignalProcessor {
       this.log.debug("Size rounds to zero, skipping", { coin: action.coin });
       return;
     }
+
+    // 根据 useLimitOrder 决定使用限价单还是市价单
+    if (action.useLimitOrder) {
+      await this.executeLimitOrder(action, metadata, markPrice, sizeStr);
+    } else {
+      await this.executeMarketOrder(action, metadata, markPrice, sizeStr);
+    }
+  }
+
+  /**
+   * Execute a market order (IOC - Immediate or Cancel).
+   * Used for new positions, full closes, and reversals.
+   */
+  private async executeMarketOrder(
+    action: CopyAction,
+    metadata: { assetId: number; sizeDecimals: number },
+    markPrice: number,
+    sizeStr: string,
+  ): Promise<void> {
+    // 优先使用中间价（订单簿中点），回退到标记价格
+    const executionPrice = this.deps.metadataService.getExecutionPrice(action.coin) ?? action.price;
+
+    // 从配置获取滑点，默认 5%（与官方 SDK 一致）
+    const slippage = this.deps.risk.marketOrderSlippage ?? 0.05;
+    
+    // 市价单 = 激进限价单 + IoC
+    const priceMultiplier = action.action === "buy" ? 1 + slippage : 1 - slippage;
+    const limitPrice = clamp(executionPrice * priceMultiplier, executionPrice * 0.5, executionPrice * 2);
+    const priceStr = roundToMarkPricePrecision(limitPrice, markPrice);
 
     const notional = action.size * executionPrice;
 
@@ -784,8 +848,6 @@ export class SignalProcessor {
       orderType: "Ioc(市价)",
     });
 
-    // 使用 Ioc (Immediate or Cancel) 订单类型
-    // 配合 10% 滑点保护，实现类似市价单的立即成交效果
     const order = {
       a: metadata.assetId,
       b: action.action === "buy",
@@ -794,7 +856,7 @@ export class SignalProcessor {
       r: action.reduceOnly,
       t: {
         limit: {
-          tif: "Ioc" as const, // Immediate or Cancel - 立即成交或取消
+          tif: "Ioc" as const, // Immediate or Cancel
         },
       },
       c: `0x${randomUUID().replace(/-/g, "").slice(0, 32)}`,
@@ -811,32 +873,116 @@ export class SignalProcessor {
       const errors = statuses.filter((s) => "error" in s);
 
       if (filled.length > 0) {
-        this.log.info("✅ Order executed successfully", { coin: action.coin });
-        // Log success to trade log
+        this.log.info("✅ 市价单执行成功", { coin: action.coin });
         this.tradeLogger?.logTradeSuccess(action);
       }
       if (errors.length > 0) {
         const errorMsg = errors.map((e) => ("error" in e ? e.error : "unknown")).join(", ");
-        this.log.warn("❌ Order failed", {
+        this.log.warn("❌ 市价单执行失败", {
           coin: action.coin,
           errors: errors.map((e) => ("error" in e ? e.error : "unknown")),
         });
-        // Log failure to trade log
         this.tradeLogger?.logTradeFailed(action, errorMsg);
       }
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      if (errorMessage.includes("Insufficient margin")) {
-        this.log.warn("Order failed: insufficient margin", { coin: action.coin });
-        this.tradeLogger?.logTradeFailed(action, "保证金不足");
-      } else {
-        this.log.error("Order execution failed", {
-          coin: action.coin,
-          error: errorMessage,
-        });
-        this.tradeLogger?.logTradeFailed(action, errorMessage);
-        this.tradeLogger?.logError("订单执行异常", error instanceof Error ? error : undefined);
+      this.handleOrderError(action, error);
+    }
+  }
+
+  /**
+   * Execute a limit order (GTC - Good Till Cancelled).
+   * Used for add/reduce positions in smart order mode (Maker fee).
+   * If the limit order doesn't fill, reconciliation will catch up.
+   */
+  private async executeLimitOrder(
+    action: CopyAction,
+    metadata: { assetId: number; sizeDecimals: number },
+    markPrice: number,
+    sizeStr: string,
+  ): Promise<void> {
+    // 限价单使用领航员的成交价格
+    const limitPrice = action.price;
+    const priceStr = roundToMarkPricePrecision(limitPrice, markPrice);
+
+    const notional = action.size * limitPrice;
+
+    this.log.info(`${action.description} [限价单]`, {
+      coin: action.coin,
+      action: action.action === "buy" ? "买入" : "卖出",
+      size: sizeStr,
+      notional: "$" + notional.toFixed(2),
+      limitPrice: "$" + limitPrice.toFixed(2),
+      reduceOnly: action.reduceOnly,
+      orderType: "Gtc(限价)",
+      note: "未成交将由对账兜底",
+    });
+
+    const order = {
+      a: metadata.assetId,
+      b: action.action === "buy",
+      p: priceStr,
+      s: sizeStr,
+      r: action.reduceOnly,
+      t: {
+        limit: {
+          tif: "Gtc" as const, // Good Till Cancelled
+        },
+      },
+      c: `0x${randomUUID().replace(/-/g, "").slice(0, 32)}`,
+    };
+
+    try {
+      const response = await this.deps.exchangeClient.order({
+        orders: [order],
+        grouping: "na",
+      });
+
+      const statuses = response.response.data.statuses;
+      
+      if (statuses.length === 0) {
+        this.log.warn("❌ 限价单响应为空", { coin: action.coin });
+        return;
       }
+
+      const status = statuses[0];
+
+      if (status && "resting" in status) {
+        this.log.info("✅ 限价单挂单成功（等待成交）", {
+          coin: action.coin,
+          oid: status.resting.oid,
+        });
+        this.tradeLogger?.logTradeSuccess(action);
+      } else if (status && "filled" in status) {
+        this.log.info("✅ 限价单立即成交", { coin: action.coin });
+        this.tradeLogger?.logTradeSuccess(action);
+      } else if (status && "error" in status) {
+        const errorMsg = (status as { error: string }).error;
+        this.log.warn("❌ 限价单执行失败", {
+          coin: action.coin,
+          error: errorMsg,
+        });
+        this.tradeLogger?.logTradeFailed(action, errorMsg);
+      }
+    } catch (error) {
+      this.handleOrderError(action, error);
+    }
+  }
+
+  /**
+   * Handle order execution errors.
+   */
+  private handleOrderError(action: CopyAction, error: unknown): void {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (errorMessage.includes("Insufficient margin")) {
+      this.log.warn("Order failed: insufficient margin", { coin: action.coin });
+      this.tradeLogger?.logTradeFailed(action, "保证金不足");
+    } else {
+      this.log.error("Order execution failed", {
+        coin: action.coin,
+        error: errorMessage,
+      });
+      this.tradeLogger?.logTradeFailed(action, errorMessage);
+      this.tradeLogger?.logError("订单执行异常", error instanceof Error ? error : undefined);
     }
   }
 

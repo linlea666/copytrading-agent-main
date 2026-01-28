@@ -135,40 +135,31 @@ export interface CopyPairConfig {
   /** Whether this pair is enabled for copy trading */
   enabled: boolean;
 
-  // ==================== 混合模式配置（双订阅+智能去重） ====================
+  // ==================== 智能订单模式配置 ====================
 
   /**
-   * 是否启用混合模式（Hybrid Mode）
+   * 是否启用智能订单模式（Smart Order Mode）
    * 
-   * 混合模式同时订阅 openOrders（限价单挂单）和 userFills（成交信号）：
-   * - 领航员挂限价单 → 跟单者也挂限价单（享受 Maker 费率）
-   * - 领航员市价单成交 → 跟单者使用市价单跟随（实时跟单）
-   * - 通过 oid 智能去重，避免重复跟单
+   * 智能订单模式根据交易类型自动选择订单类型：
+   * - 新开仓/平仓/反向开仓 → 使用市价单（IOC），确保及时成交
+   * - 加仓/减仓 → 使用限价单（GTC），享受 Maker 费率（0.015% vs 0.045%）
    * 
    * 优点：
-   * - 限价单享受 Maker 低费率
-   * - 市价单实时跟随不延迟
-   * - 100% 捕获率（限价单+市价单都能跟）
+   * - 开仓/平仓确保及时成交（市价单）
+   * - 加仓/减仓降低手续费（限价单 Maker 费率）
+   * - 限价单未成交由对账机制兜底
+   * - 频繁加减仓场景手续费降低 40-60%
    * 
    * 适用场景：
-   * - 领航员混合使用限价单和市价单
-   * - 希望优化手续费同时保证实时性
+   * - 领航员频繁加仓/减仓
+   * - 希望优化手续费
+   * 
+   * 建议配置：
+   * - 启用时建议 syncDebounceMs 设为 1000-2000ms（聚合更多操作）
    * 
    * @default false
    */
-  enableHybridMode?: boolean;
-
-  /**
-   * 混合模式专用配置
-   */
-  hybridConfig?: {
-    /**
-     * Fill 聚合窗口（毫秒）
-     * 同一订单的多笔成交在此窗口内聚合为一笔跟单
-     * @default 500
-     */
-    fillAggregationWindowMs?: number | undefined;
-  } | undefined;
+  enableSmartOrder?: boolean;
 }
 
 /**
@@ -248,10 +239,7 @@ export const CONFIG_DEFAULTS = {
       marketOrderSlippage: 0.05,
       boostPriceThreshold: 0.0005,
     },
-    // 混合模式默认配置
-    enableHybridMode: false,
-    hybridConfig: {
-      fillAggregationWindowMs: 500,
-    },
+    // 智能订单模式默认配置
+    enableSmartOrder: false,
   },
 } as const;

@@ -9,20 +9,13 @@
  * - Periodic state reconciliation
  *
  * Two modes are supported:
- * 1. Normal mode (default): Subscribe to userFills, execute IOC market orders
- * 2. Hybrid mode: Subscribe to both openOrders and userFills with intelligent deduplication
- *    - Limit orders: mirror with GTC limit orders (Maker fees)
- *    - Market orders: follow with IOC market orders (real-time)
+ * 1. Normal mode (default): All orders use IOC (market order)
+ * 2. Smart order mode: New/close/reverse use IOC, add/reduce use GTC (limit order for Maker fee)
  *
- * Trading Flow (Normal mode):
+ * Trading Flow:
  * 1. WebSocket receives leader's fill events
  * 2. SignalProcessor processes fills and executes copy trades
- * 3. Reconciler periodically syncs state
- *
- * Trading Flow (Hybrid mode):
- * 1. WebSocket receives both openOrders and userFills
- * 2. HybridModeService handles deduplication and execution
- * 3. Reconciler periodically syncs state
+ * 3. Reconciler periodically syncs state (and catches unfilled limit orders)
  */
 
 import type * as hl from "@nktkas/hyperliquid";
@@ -33,7 +26,6 @@ import { HistoryPositionTracker } from "../domain/historyTracker.js";
 import { MarketMetadataService } from "../services/marketMetadata.js";
 import { SignalProcessor } from "../services/signalProcessor.js";
 import { SubscriptionService } from "../services/subscriptions.js";
-import { HybridModeService } from "../services/hybridMode.js";
 import { Reconciler } from "../services/reconciler.js";
 import { createInstanceLogger } from "../utils/instanceLogger.js";
 import { logger, type Logger } from "../utils/logger.js";
@@ -63,15 +55,12 @@ export class CopyTradingInstance {
   private readonly reconciler: Reconciler;
   private readonly log: Logger;
 
-  // Normal mode components (mutually exclusive with hybrid mode)
-  private readonly signalProcessor?: SignalProcessor;
-  private readonly subscriptions?: SubscriptionService;
+  // Core components
+  private readonly signalProcessor: SignalProcessor;
+  private readonly subscriptions: SubscriptionService;
 
-  // Hybrid mode component (dual subscription + deduplication)
-  private readonly hybridService?: HybridModeService;
-
-  /** Whether hybrid mode is enabled */
-  private readonly isHybridMode: boolean;
+  /** Whether smart order mode is enabled */
+  private readonly isSmartOrderMode: boolean;
 
   private status: InstanceStatus = "created";
 
@@ -104,70 +93,49 @@ export class CopyTradingInstance {
       this.log,
     );
 
-    // Determine mode
-    this.isHybridMode = pairConfig.enableHybridMode ?? false;
+    // Determine smart order mode
+    this.isSmartOrderMode = pairConfig.enableSmartOrder ?? false;
 
-    if (this.isHybridMode) {
-      // ==================== Hybrid Mode ====================
-      // Subscribe to both openOrders and userFills with intelligent deduplication
-      this.log.info("🔀 配置为混合模式（双订阅+智能去重）");
-
-      this.hybridService = new HybridModeService({
-        subscriptionClient: clients.subscriptionClient,
-        exchangeClient: clients.exchangeClient,
-        infoClient: clients.infoClient,
-        leaderAddress: pairConfig.leaderAddress as `0x${string}`,
-        followerAddress: clients.followerTradingAddress,
-        leaderState: this.leaderState,
-        followerState: this.followerState,
-        metadataService: sharedMetadata,
-        risk: pairConfig.risk,
-        minOrderNotionalUsd: pairConfig.minOrderNotionalUsd,
-        historyTracker: this.historyTracker,
-        fillAggregationWindowMs: pairConfig.hybridConfig?.fillAggregationWindowMs,
-        pairId: pairConfig.id,
-        logDir: globalConfig.stateDir,
-        enableTradeLog: globalConfig.enableTradeLog ?? true,
-        log: this.log,
-      });
+    if (this.isSmartOrderMode) {
+      this.log.info("💡 配置为智能订单模式（加仓/减仓使用限价单）");
     } else {
-      // ==================== Normal Mode ====================
-      // Subscribe to leader's userFills, execute IOC market orders
-      this.log.info("🔄 配置为正常跟单模式");
-
-      // Initialize signal processor (core trading logic)
-      this.signalProcessor = new SignalProcessor({
-        exchangeClient: clients.exchangeClient,
-        infoClient: clients.infoClient,
-        leaderAddress: pairConfig.leaderAddress as `0x${string}`,
-        followerAddress: clients.followerTradingAddress,
-        leaderState: this.leaderState,
-        followerState: this.followerState,
-        metadataService: this.sharedMetadata,
-        risk: pairConfig.risk,
-        minOrderNotionalUsd: pairConfig.minOrderNotionalUsd,
-        historyTracker: this.historyTracker,
-        syncLeverage: true,
-        log: this.log,
-        // Trade logging configuration
-        pairId: pairConfig.id,
-        logDir: globalConfig.stateDir,
-        enableTradeLog: globalConfig.enableTradeLog ?? true,
-      });
-
-      // Initialize WebSocket subscription service
-      const subscriptionConfig = {
-        leaderAddress: pairConfig.leaderAddress,
-        websocketAggregateFills: globalConfig.websocketAggregateFills,
-      };
-      this.subscriptions = new SubscriptionService(
-        clients.subscriptionClient,
-        subscriptionConfig as any,
-        this.leaderState,
-        this.signalProcessor,
-        this.log,
-      );
+      this.log.info("🔄 配置为正常跟单模式（全部市价单）");
     }
+
+    // Initialize signal processor (core trading logic)
+    this.signalProcessor = new SignalProcessor({
+      exchangeClient: clients.exchangeClient,
+      infoClient: clients.infoClient,
+      leaderAddress: pairConfig.leaderAddress as `0x${string}`,
+      followerAddress: clients.followerTradingAddress,
+      leaderState: this.leaderState,
+      followerState: this.followerState,
+      metadataService: this.sharedMetadata,
+      risk: pairConfig.risk,
+      minOrderNotionalUsd: pairConfig.minOrderNotionalUsd,
+      historyTracker: this.historyTracker,
+      syncLeverage: true,
+      log: this.log,
+      // Trade logging configuration
+      pairId: pairConfig.id,
+      logDir: globalConfig.stateDir,
+      enableTradeLog: globalConfig.enableTradeLog ?? true,
+      // Smart order mode: add/reduce use limit orders
+      enableSmartOrder: this.isSmartOrderMode,
+    });
+
+    // Initialize WebSocket subscription service
+    const subscriptionConfig = {
+      leaderAddress: pairConfig.leaderAddress,
+      websocketAggregateFills: globalConfig.websocketAggregateFills,
+    };
+    this.subscriptions = new SubscriptionService(
+      clients.subscriptionClient,
+      subscriptionConfig as any,
+      this.leaderState,
+      this.signalProcessor,
+      this.log,
+    );
 
     // Initialize reconciler (state sync + fallback full close)
     const reconcilerConfig = {
@@ -289,23 +257,16 @@ export class CopyTradingInstance {
         this.log.info("No historical positions - all new leader trades will be copied");
       }
 
-      // 4. Start appropriate service based on mode
-      if (this.isHybridMode) {
-        // Hybrid mode: subscribe to both openOrders and userFills
-        await this.hybridService!.start();
-        this.log.info("📡 监听领航员信号中（混合模式：限价单+市价单）...");
-      } else {
-        // Normal mode: subscribe to userFills
-        await this.subscriptions!.start();
-        this.log.info("📡 监听领航员成交中（正常跟单模式）...");
-      }
+      // 4. Start WebSocket subscriptions
+      await this.subscriptions.start();
+      this.log.info("📡 监听领航员成交中...");
 
-      // 5. Start periodic state reconciliation (no trading, just state sync)
+      // 5. Start periodic state reconciliation (no trading, just state sync + fallback)
       this.reconciler.start();
 
       this.status = "running";
       this.log.info("✅ Copy trading instance started successfully", {
-        mode: this.isHybridMode ? "混合模式" : "正常跟单",
+        mode: this.isSmartOrderMode ? "智能订单模式" : "正常跟单模式",
       });
     } catch (error) {
       this.status = "error";
@@ -328,16 +289,10 @@ export class CopyTradingInstance {
     this.log.info("Stopping copy trading instance");
 
     try {
-      // Stop appropriate service based on mode
-      if (this.isHybridMode) {
-        await this.hybridService?.stop().catch((error) => {
-          this.log.error("Error stopping hybrid service", { error });
-        });
-      } else {
-        await this.subscriptions?.stop().catch((error) => {
-          this.log.error("Error stopping subscriptions", { error });
-        });
-      }
+      // Stop WebSocket subscriptions
+      await this.subscriptions.stop().catch((error) => {
+        this.log.error("Error stopping subscriptions", { error });
+      });
 
       // Stop periodic reconciliation
       this.reconciler.stop();

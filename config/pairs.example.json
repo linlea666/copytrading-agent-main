@@ -9,7 +9,7 @@
   "_comment_global": "reconciliationIntervalMs 建议设为 60000(60秒)",
   "pairs": [
     {
-      "id": "smart-whale-1",
+      "id": "normal-trader",
       "leaderAddress": "0x1234567890123456789012345678901234567890",
       "followerPrivateKey": "${FOLLOWER_1_PRIVATE_KEY}",
       "followerAddress": "0xYOUR_MAIN_ACCOUNT_ADDRESS_HERE",
@@ -26,11 +26,11 @@
       "minOrderNotionalUsd": 15,
       "syncDebounceMs": 300,
       "enabled": true,
-      "_comment_1": "正常跟单模式（默认）：监听成交信号，使用市价单跟单",
+      "_comment_1": "正常跟单模式（默认）：监听成交信号，全部使用市价单跟单",
       "_comment_2": "使用API钱包时: followerPrivateKey=API钱包私钥, followerAddress=主账户地址"
     },
     {
-      "id": "hybrid-mode-trader",
+      "id": "smart-order-trader",
       "leaderAddress": "0x0987654321098765432109876543210987654321",
       "followerPrivateKey": "${FOLLOWER_2_PRIVATE_KEY}",
       "followerAddress": "0xYOUR_MAIN_ACCOUNT_ADDRESS_HERE",
@@ -45,18 +45,15 @@
         "boostPriceThreshold": 0.005
       },
       "minOrderNotionalUsd": 12,
-      "syncDebounceMs": 500,
+      "syncDebounceMs": 1000,
       "enabled": true,
-      "enableHybridMode": true,
-      "hybridConfig": {
-        "fillAggregationWindowMs": 500
-      },
-      "_comment_hybrid_1": "enableHybridMode: 启用混合模式（双订阅+智能去重）",
-      "_comment_hybrid_2": "同时监听 openOrders（限价单）和 userFills（成交）",
-      "_comment_hybrid_3": "限价单 → 跟单使用 GTC 限价单（享受 Maker 费率）",
-      "_comment_hybrid_4": "市价单 → 跟单使用 IOC 市价单（实时跟单）",
-      "_comment_hybrid_5": "通过 oid 智能去重，避免重复跟单",
-      "_comment_hybrid_6": "适用于混合使用限价单和市价单的领航员"
+      "enableSmartOrder": true,
+      "_comment_smart_1": "enableSmartOrder: 启用智能订单模式",
+      "_comment_smart_2": "新开仓/平仓/反向 → 使用市价单（IOC，确保成交）",
+      "_comment_smart_3": "加仓/减仓 → 使用限价单（GTC，享受 Maker 费率 0.015%）",
+      "_comment_smart_4": "限价单未成交由对账机制兜底",
+      "_comment_smart_5": "适用于频繁加仓/减仓的领航员，可降低 40-60% 手续费",
+      "_comment_smart_6": "建议 syncDebounceMs 设为 1000-2000ms（聚合更多加减仓操作）"
     }
   ]
 }
