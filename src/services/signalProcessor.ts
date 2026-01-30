@@ -892,19 +892,23 @@ export class SignalProcessor {
   /**
    * Execute a limit order (GTC - Good Till Cancelled) with smart Maker pricing.
    * 
-   * Smart Maker Pricing Strategy (方案 B++):
-   * 1. Fetch current order book (bestBid, bestAsk)
-   * 2. Calculate Maker price:
-   *    - Buy: bestBid + offset (just above best bid, ensures Maker)
-   *    - Sell: bestAsk - offset (just below best ask, ensures Maker)
-   * 3. Compare with leader price, take the favorable one:
-   *    - Buy: min(makerPrice, leaderPrice) → never pay more than leader
-   *    - Sell: max(makerPrice, leaderPrice) → never sell cheaper than leader
+   * Smart Maker Pricing Strategy (方案 C++):
+   * 
+   * 核心思路：通过入场均价和标记价判断市场趋势，在明确趋势时顺势偏移价格
+   * 
+   * 策略规则：
+   * - 加仓 + 被套：顺趋势偏移（DCA 场景，趋势延续概率高）
+   * - 减仓 + 盈利：顺趋势偏移（止盈场景，趋势延续概率高）
+   * - 其他情况：保守策略（趋势不明确或可能反转）
+   * 
+   * 偏移方向：
+   * - 市场上涨 + 卖出：bestAsk + offset（卖更贵）
+   * - 市场下跌 + 买入：bestBid - offset（买更便宜）
    * 
    * Benefits:
-   * - Most orders will be Maker (0.015% fee vs 0.045% Taker)
-   * - Price is never worse than leader's execution price
-   * - If market moves favorably, follower gets better price
+   * - Maker 成交率更高（价格更保守）
+   * - 顺趋势时价格更有利
+   * - 有领航员价格兜底，不会更差
    */
   private async executeLimitOrder(
     action: CopyAction,
@@ -914,6 +918,34 @@ export class SignalProcessor {
   ): Promise<void> {
     const leaderPrice = action.price;
     const isBuy = action.action === "buy";
+
+    // ===== 1. 获取领航员仓位状态 =====
+    const leaderPos = this.deps.leaderState.getPosition(action.coin);
+    const entryPrice = leaderPos?.entryPrice ?? leaderPrice;
+    const currentMarkPrice = this.deps.metadataService.getMarkPrice(action.coin) ?? markPrice;
+    const leaderSize = leaderPos?.size ?? 0;
+    const isLong = leaderSize > 0;
+    const hasPosition = Math.abs(leaderSize) > EPSILON;
+
+    // ===== 2. 判断市场趋势和领航员状态 =====
+    const marketUp = currentMarkPrice > entryPrice;
+    const marketDown = currentMarkPrice < entryPrice;
+    const isUnderwater = hasPosition && (isLong ? marketDown : marketUp);  // 被套
+    const isProfitable = hasPosition && (isLong ? marketUp : marketDown);  // 盈利
+
+    // 判断是加仓还是减仓
+    const isAddPosition = !action.reduceOnly;
+    const isReducePosition = action.reduceOnly;
+
+    // ===== 3. 决定是否使用趋势偏移 =====
+    // 加仓+被套 或 减仓+盈利 时使用趋势偏移
+    const useTrendOffset = 
+      (isAddPosition && isUnderwater) ||   // 加仓+被套 → DCA，趋势延续
+      (isReducePosition && isProfitable);  // 减仓+盈利 → 止盈，趋势延续
+
+    // 记录状态用于日志
+    const leaderStatus = !hasPosition ? "无仓位" : (isUnderwater ? "被套" : (isProfitable ? "盈利" : "持平"));
+    const marketTrend = marketUp ? "上涨" : (marketDown ? "下跌" : "持平");
 
     // Fetch fresh order book for smart pricing
     const orderBook = await this.deps.metadataService.refreshOrderBook(action.coin);
@@ -935,32 +967,44 @@ export class SignalProcessor {
         limitPrice = leaderPrice;
         pricingMethod = "领航员价(盘口异常)";
       } else {
-        // Maker 定价策略：
-        // - 买入要成为 Maker：价格必须 <= bestBid（在买单队列中等待）
-        // - 卖出要成为 Maker：价格必须 >= bestAsk（在卖单队列中等待）
-        // 
-        // 同时和领航员价格比较，确保跟单者价格不比领航员更差
+        // 计算趋势偏移量（10% of spread）
+        const trendOffset = spread * 0.1;
 
         if (isBuy) {
-          // 买入 Maker 价：用 bestBid（在买单队列最前面等待成交）
-          // 然后和领航员价格比较，取更低的（不比领航员买得贵）
-          const makerPrice = bestBid;
-          limitPrice = Math.min(makerPrice, leaderPrice);
-          pricingMethod = limitPrice === makerPrice ? "Maker(bestBid)" : "领航员价";
+          if (useTrendOffset && marketDown) {
+            // 市场下跌 + 符合条件 → 买入挂更低价（顺趋势，买更便宜）
+            const trendPrice = bestBid - trendOffset;
+            limitPrice = Math.min(trendPrice, leaderPrice);
+            pricingMethod = limitPrice === trendPrice ? "趋势增强(买低)" : "领航员价";
+          } else {
+            // 保守策略
+            limitPrice = Math.min(bestBid, leaderPrice);
+            pricingMethod = limitPrice === bestBid ? "保守(bestBid)" : "领航员价";
+          }
         } else {
-          // 卖出 Maker 价：用 bestAsk（在卖单队列最前面等待成交）
-          // 然后和领航员价格比较，取更高的（不比领航员卖得便宜）
-          const makerPrice = bestAsk;
-          limitPrice = Math.max(makerPrice, leaderPrice);
-          pricingMethod = limitPrice === makerPrice ? "Maker(bestAsk)" : "领航员价";
+          if (useTrendOffset && marketUp) {
+            // 市场上涨 + 符合条件 → 卖出挂更高价（顺趋势，卖更贵）
+            const trendPrice = bestAsk + trendOffset;
+            limitPrice = Math.max(trendPrice, leaderPrice);
+            pricingMethod = limitPrice === trendPrice ? "趋势增强(卖高)" : "领航员价";
+          } else {
+            // 保守策略
+            limitPrice = Math.max(bestAsk, leaderPrice);
+            pricingMethod = limitPrice === bestAsk ? "保守(bestAsk)" : "领航员价";
+          }
         }
 
-        this.log.debug("智能 Maker 定价", {
+        this.log.debug("智能 Maker 定价 (C++)", {
           coin: action.coin,
           action: isBuy ? "买入" : "卖出",
           bestBid: "$" + bestBid.toFixed(2),
           bestAsk: "$" + bestAsk.toFixed(2),
           spread: "$" + spread.toFixed(4),
+          entryPrice: "$" + entryPrice.toFixed(2),
+          markPrice: "$" + currentMarkPrice.toFixed(2),
+          leaderStatus,
+          marketTrend,
+          useTrendOffset,
           leaderPrice: "$" + leaderPrice.toFixed(2),
           finalPrice: "$" + limitPrice.toFixed(2),
           pricingMethod,
@@ -983,6 +1027,9 @@ export class SignalProcessor {
       notional: "$" + notional.toFixed(2),
       limitPrice: "$" + limitPrice.toFixed(2),
       leaderPrice: "$" + leaderPrice.toFixed(2),
+      entryPrice: "$" + entryPrice.toFixed(2),
+      leaderStatus,
+      marketTrend,
       pricingMethod,
       reduceOnly: action.reduceOnly,
       orderType: "Gtc(Maker)",
