@@ -890,9 +890,21 @@ export class SignalProcessor {
   }
 
   /**
-   * Execute a limit order (GTC - Good Till Cancelled).
-   * Used for add/reduce positions in smart order mode (Maker fee).
-   * If the limit order doesn't fill, reconciliation will catch up.
+   * Execute a limit order (GTC - Good Till Cancelled) with smart Maker pricing.
+   * 
+   * Smart Maker Pricing Strategy (方案 B++):
+   * 1. Fetch current order book (bestBid, bestAsk)
+   * 2. Calculate Maker price:
+   *    - Buy: bestBid + offset (just above best bid, ensures Maker)
+   *    - Sell: bestAsk - offset (just below best ask, ensures Maker)
+   * 3. Compare with leader price, take the favorable one:
+   *    - Buy: min(makerPrice, leaderPrice) → never pay more than leader
+   *    - Sell: max(makerPrice, leaderPrice) → never sell cheaper than leader
+   * 
+   * Benefits:
+   * - Most orders will be Maker (0.015% fee vs 0.045% Taker)
+   * - Price is never worse than leader's execution price
+   * - If market moves favorably, follower gets better price
    */
   private async executeLimitOrder(
     action: CopyAction,
@@ -900,26 +912,84 @@ export class SignalProcessor {
     markPrice: number,
     sizeStr: string,
   ): Promise<void> {
-    // 限价单使用领航员的成交价格
-    const limitPrice = action.price;
-    const priceStr = roundToMarkPricePrecision(limitPrice, markPrice);
+    const leaderPrice = action.price;
+    const isBuy = action.action === "buy";
 
+    // Fetch fresh order book for smart pricing
+    const orderBook = await this.deps.metadataService.refreshOrderBook(action.coin);
+
+    let limitPrice: number;
+    let pricingMethod: string;
+
+    if (orderBook) {
+      const { bestBid, bestAsk } = orderBook;
+
+      // 边界检查：订单簿异常（spread <= 0）时回退到领航员价格
+      const spread = bestAsk - bestBid;
+      if (spread <= 0) {
+        this.log.warn("订单簿异常：spread <= 0，回退到领航员价格", {
+          coin: action.coin,
+          bestBid: "$" + bestBid.toFixed(2),
+          bestAsk: "$" + bestAsk.toFixed(2),
+        });
+        limitPrice = leaderPrice;
+        pricingMethod = "领航员价(盘口异常)";
+      } else {
+        // Calculate Maker price with small offset
+        // This ensures we're just inside the spread, not crossing it
+        const minOffset = spread * 0.1; // 10% of spread as minimum offset
+
+        if (isBuy) {
+          // 买入 Maker 价：在买一上方一点（确保是 Maker，但不穿过 spread）
+          // 然后和领航员价格比较，取更低的（不比领航员买得贵）
+          const makerPrice = bestBid + minOffset;
+          limitPrice = Math.min(makerPrice, leaderPrice);
+          pricingMethod = limitPrice === makerPrice ? "Maker(盘口)" : "领航员价";
+        } else {
+          // 卖出 Maker 价：在卖一下方一点（确保是 Maker，但不穿过 spread）
+          // 然后和领航员价格比较，取更高的（不比领航员卖得便宜）
+          const makerPrice = bestAsk - minOffset;
+          limitPrice = Math.max(makerPrice, leaderPrice);
+          pricingMethod = limitPrice === makerPrice ? "Maker(盘口)" : "领航员价";
+        }
+
+        this.log.debug("智能 Maker 定价", {
+          coin: action.coin,
+          action: isBuy ? "买入" : "卖出",
+          bestBid: "$" + bestBid.toFixed(2),
+          bestAsk: "$" + bestAsk.toFixed(2),
+          spread: "$" + spread.toFixed(4),
+          leaderPrice: "$" + leaderPrice.toFixed(2),
+          finalPrice: "$" + limitPrice.toFixed(2),
+          pricingMethod,
+        });
+      }
+    } else {
+      // Fallback: use leader price if order book unavailable
+      limitPrice = leaderPrice;
+      pricingMethod = "领航员价(回退)";
+      this.log.warn("无法获取盘口，使用领航员价格", { coin: action.coin });
+    }
+
+    const priceStr = roundToMarkPricePrecision(limitPrice, markPrice);
     const notional = action.size * limitPrice;
 
-    this.log.info(`${action.description} [限价单]`, {
+    this.log.info(`${action.description} [Maker限价单]`, {
       coin: action.coin,
-      action: action.action === "buy" ? "买入" : "卖出",
+      action: isBuy ? "买入" : "卖出",
       size: sizeStr,
       notional: "$" + notional.toFixed(2),
       limitPrice: "$" + limitPrice.toFixed(2),
+      leaderPrice: "$" + leaderPrice.toFixed(2),
+      pricingMethod,
       reduceOnly: action.reduceOnly,
-      orderType: "Gtc(限价)",
+      orderType: "Gtc(Maker)",
       note: "未成交将由对账兜底",
     });
 
     const order = {
       a: metadata.assetId,
-      b: action.action === "buy",
+      b: isBuy,
       p: priceStr,
       s: sizeStr,
       r: action.reduceOnly,
@@ -940,24 +1010,29 @@ export class SignalProcessor {
       const statuses = response.response.data.statuses;
       
       if (statuses.length === 0) {
-        this.log.warn("❌ 限价单响应为空", { coin: action.coin });
+        this.log.warn("❌ Maker限价单响应为空", { coin: action.coin });
         return;
       }
 
       const status = statuses[0];
 
       if (status && "resting" in status) {
-        this.log.info("✅ 限价单挂单成功（等待成交）", {
+        this.log.info("✅ Maker限价单挂单成功（等待成交）", {
           coin: action.coin,
           oid: status.resting.oid,
+          pricingMethod,
         });
         this.tradeLogger?.logTradeSuccess(action);
       } else if (status && "filled" in status) {
-        this.log.info("✅ 限价单立即成交", { coin: action.coin });
+        // 立即成交说明价格穿过了盘口，下次可能需要调整偏移
+        this.log.info("✅ Maker限价单立即成交（实际为Taker）", {
+          coin: action.coin,
+          note: "价格可能穿过盘口",
+        });
         this.tradeLogger?.logTradeSuccess(action);
       } else if (status && "error" in status) {
         const errorMsg = (status as { error: string }).error;
-        this.log.warn("❌ 限价单执行失败", {
+        this.log.warn("❌ Maker限价单执行失败", {
           coin: action.coin,
           error: errorMsg,
         });

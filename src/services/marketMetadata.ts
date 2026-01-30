@@ -4,6 +4,7 @@
  * Maintains:
  * - Asset metadata (asset IDs, size decimals, max leverage)
  * - Current mark prices for all assets
+ * - Order book data (best bid/ask) for smart order execution
  *
  * Metadata is loaded once on initialization and mark prices can be refreshed periodically.
  */
@@ -28,6 +29,18 @@ export interface AssetMetadata {
 }
 
 /**
+ * Order book data for a single coin.
+ */
+export interface OrderBookData {
+  /** Best bid price (highest buy order) */
+  bestBid: number;
+  /** Best ask price (lowest sell order) */
+  bestAsk: number;
+  /** Timestamp of the data */
+  timestamp: number;
+}
+
+/**
  * Caches market metadata and mark prices for efficient order construction.
  */
 export class MarketMetadataService {
@@ -35,6 +48,7 @@ export class MarketMetadataService {
   private readonly coinToMeta = new Map<string, AssetMetadata>();
   private readonly coinToMarkPx = new Map<string, number>();
   private readonly coinToMidPx = new Map<string, number>();
+  private readonly coinToOrderBook = new Map<string, OrderBookData>();
 
   constructor(private readonly infoClient: hl.InfoClient, private readonly log: Logger = logger) {}
 
@@ -154,5 +168,85 @@ export class MarketMetadataService {
       }
     });
     this.log.debug("Refreshed mark prices");
+  }
+
+  /**
+   * Fetches L2 order book for a specific coin and caches best bid/ask.
+   * Used for smart Maker limit order pricing.
+   *
+   * @param coin - Asset symbol (e.g., "BTC")
+   * @param signal - Optional abort signal to cancel the request
+   * @returns Order book data or undefined if fetch fails
+   */
+  async refreshOrderBook(coin: string, signal?: AbortSignal): Promise<OrderBookData | undefined> {
+    try {
+      const book = await this.infoClient.l2Book({ coin }, signal);
+      if (!book || !book.levels) {
+        this.log.debug("No order book data", { coin });
+        return undefined;
+      }
+
+      const [bids, asks] = book.levels;
+
+      // bids[0] = highest bid, asks[0] = lowest ask
+      const topBid = bids[0];
+      const topAsk = asks[0];
+      if (!topBid || !topAsk) {
+        this.log.debug("Empty order book", { coin });
+        return undefined;
+      }
+
+      // L2BookLevelSchema: { px: string, sz: string, n: number }
+      const bestBid = parseFloat(topBid.px);
+      const bestAsk = parseFloat(topAsk.px);
+
+      if (isNaN(bestBid) || isNaN(bestAsk) || bestBid <= 0 || bestAsk <= 0) {
+        this.log.debug("Invalid order book prices", { coin, bestBid, bestAsk });
+        return undefined;
+      }
+
+      const orderBookData: OrderBookData = {
+        bestBid,
+        bestAsk,
+        timestamp: book.time,
+      };
+
+      this.coinToOrderBook.set(coin, orderBookData);
+      this.log.debug("Refreshed order book", {
+        coin,
+        bestBid: "$" + bestBid.toFixed(2),
+        bestAsk: "$" + bestAsk.toFixed(2),
+        spread: ((bestAsk - bestBid) / bestBid * 100).toFixed(4) + "%",
+      });
+
+      return orderBookData;
+    } catch (error) {
+      this.log.warn("Failed to refresh order book", {
+        coin,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
+    }
+  }
+
+  /**
+   * Gets cached order book data for a coin.
+   */
+  getOrderBook(coin: string): OrderBookData | undefined {
+    return this.coinToOrderBook.get(coin);
+  }
+
+  /**
+   * Gets best bid price for a coin.
+   */
+  getBestBid(coin: string): number | undefined {
+    return this.coinToOrderBook.get(coin)?.bestBid;
+  }
+
+  /**
+   * Gets best ask price for a coin.
+   */
+  getBestAsk(coin: string): number | undefined {
+    return this.coinToOrderBook.get(coin)?.bestAsk;
   }
 }
