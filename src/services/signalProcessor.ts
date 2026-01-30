@@ -935,22 +935,24 @@ export class SignalProcessor {
         limitPrice = leaderPrice;
         pricingMethod = "领航员价(盘口异常)";
       } else {
-        // Calculate Maker price with small offset
-        // This ensures we're just inside the spread, not crossing it
-        const minOffset = spread * 0.1; // 10% of spread as minimum offset
+        // Maker 定价策略：
+        // - 买入要成为 Maker：价格必须 <= bestBid（在买单队列中等待）
+        // - 卖出要成为 Maker：价格必须 >= bestAsk（在卖单队列中等待）
+        // 
+        // 同时和领航员价格比较，确保跟单者价格不比领航员更差
 
         if (isBuy) {
-          // 买入 Maker 价：在买一上方一点（确保是 Maker，但不穿过 spread）
+          // 买入 Maker 价：用 bestBid（在买单队列最前面等待成交）
           // 然后和领航员价格比较，取更低的（不比领航员买得贵）
-          const makerPrice = bestBid + minOffset;
+          const makerPrice = bestBid;
           limitPrice = Math.min(makerPrice, leaderPrice);
-          pricingMethod = limitPrice === makerPrice ? "Maker(盘口)" : "领航员价";
+          pricingMethod = limitPrice === makerPrice ? "Maker(bestBid)" : "领航员价";
         } else {
-          // 卖出 Maker 价：在卖一下方一点（确保是 Maker，但不穿过 spread）
+          // 卖出 Maker 价：用 bestAsk（在卖单队列最前面等待成交）
           // 然后和领航员价格比较，取更高的（不比领航员卖得便宜）
-          const makerPrice = bestAsk - minOffset;
+          const makerPrice = bestAsk;
           limitPrice = Math.max(makerPrice, leaderPrice);
-          pricingMethod = limitPrice === makerPrice ? "Maker(盘口)" : "领航员价";
+          pricingMethod = limitPrice === makerPrice ? "Maker(bestAsk)" : "领航员价";
         }
 
         this.log.debug("智能 Maker 定价", {
