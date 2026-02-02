@@ -892,7 +892,7 @@ export class SignalProcessor {
   /**
    * Execute a limit order (GTC - Good Till Cancelled) with smart Maker pricing.
    * 
-   * Smart Maker Pricing Strategy (方案 C++):
+   * Smart Maker Pricing Strategy (激进偏移方案):
    * 
    * 核心思路：通过入场均价和标记价判断市场趋势，在明确趋势时顺势偏移价格
    * 
@@ -901,13 +901,18 @@ export class SignalProcessor {
    * - 减仓 + 盈利：顺趋势偏移（止盈场景，趋势延续概率高）
    * - 其他情况：保守策略（趋势不明确或可能反转）
    * 
+   * 偏移量计算：
+   * - priceDiff = |markPrice - entryPrice|（当前浮动幅度）
+   * - trendOffset = priceDiff × trendOffsetMultiplier（配置项，默认 0.3）
+   * 
    * 偏移方向：
-   * - 市场上涨 + 卖出：bestAsk + offset（卖更贵）
-   * - 市场下跌 + 买入：bestBid - offset（买更便宜）
+   * - 市场上涨 + 卖出：bestAsk + trendOffset（卖更贵）
+   * - 市场下跌 + 买入：bestBid - trendOffset（买更便宜）
    * 
    * Benefits:
-   * - Maker 成交率更高（价格更保守）
-   * - 顺趋势时价格更有利
+   * - 趋势延续时获得更有利价格
+   * - 趋势反转时订单不成交，避免损失
+   * - 未成交订单由对账机制兜底
    * - 有领航员价格兜底，不会更差
    */
   private async executeLimitOrder(
@@ -967,11 +972,14 @@ export class SignalProcessor {
         limitPrice = leaderPrice;
         pricingMethod = "领航员价(盘口异常)";
       } else {
-        // 计算趋势偏移量（10% of spread）
-        const trendOffset = spread * 0.1;
+        // ===== 激进偏移量计算 =====
+        // 使用 priceDiff × multiplier 替代 spread × 0.1
+        const priceDiff = Math.abs(currentMarkPrice - entryPrice);
+        const multiplier = this.deps.risk.trendOffsetMultiplier ?? 0.3;
+        const trendOffset = priceDiff * multiplier;
 
         if (isBuy) {
-          if (useTrendOffset && marketDown) {
+          if (useTrendOffset && marketDown && trendOffset > 0) {
             // 市场下跌 + 符合条件 → 买入挂更低价（顺趋势，买更便宜）
             const trendPrice = bestBid - trendOffset;
             limitPrice = Math.min(trendPrice, leaderPrice);
@@ -982,7 +990,7 @@ export class SignalProcessor {
             pricingMethod = limitPrice === bestBid ? "保守(bestBid)" : "领航员价";
           }
         } else {
-          if (useTrendOffset && marketUp) {
+          if (useTrendOffset && marketUp && trendOffset > 0) {
             // 市场上涨 + 符合条件 → 卖出挂更高价（顺趋势，卖更贵）
             const trendPrice = bestAsk + trendOffset;
             limitPrice = Math.max(trendPrice, leaderPrice);
@@ -994,7 +1002,7 @@ export class SignalProcessor {
           }
         }
 
-        this.log.debug("智能 Maker 定价 (C++)", {
+        this.log.debug("智能 Maker 定价 (激进偏移)", {
           coin: action.coin,
           action: isBuy ? "买入" : "卖出",
           bestBid: "$" + bestBid.toFixed(2),
@@ -1002,6 +1010,9 @@ export class SignalProcessor {
           spread: "$" + spread.toFixed(4),
           entryPrice: "$" + entryPrice.toFixed(2),
           markPrice: "$" + currentMarkPrice.toFixed(2),
+          priceDiff: "$" + priceDiff.toFixed(2),
+          trendOffsetMultiplier: multiplier,
+          trendOffset: "$" + trendOffset.toFixed(4),
           leaderStatus,
           marketTrend,
           useTrendOffset,

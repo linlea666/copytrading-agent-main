@@ -42,7 +42,8 @@
         "inverse": false,
         "maxPositionDeviationPercent": 5,
         "marketOrderSlippage": 0.05,
-        "boostPriceThreshold": 0.005
+        "boostPriceThreshold": 0.005,
+        "trendOffsetMultiplier": 0.3
       },
       "minOrderNotionalUsd": 12,
       "syncDebounceMs": 1000,
@@ -53,7 +54,11 @@
       "_comment_smart_3": "加仓/减仓 → 使用限价单（GTC，享受 Maker 费率 0.015%）",
       "_comment_smart_4": "限价单未成交由对账机制兜底",
       "_comment_smart_5": "适用于频繁加仓/减仓的领航员，可降低 40-60% 手续费",
-      "_comment_smart_6": "建议 syncDebounceMs 设为 1000-2000ms（聚合更多加减仓操作）"
+      "_comment_smart_6": "建议 syncDebounceMs 设为 1000-2000ms（聚合更多加减仓操作）",
+      "_comment_smart_7": "trendOffsetMultiplier: 趋势偏移系数，用于激进定价策略",
+      "_comment_smart_8": "  - 0.1 = 保守（偏移 priceDiff 的 10%）",
+      "_comment_smart_9": "  - 0.3 = 推荐（偏移 priceDiff 的 30%，风险收益平衡）",
+      "_comment_smart_10": "  - 0.5 = 激进（偏移 priceDiff 的 50%）"
     }
   ]
 }

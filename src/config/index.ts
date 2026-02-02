@@ -40,6 +40,14 @@ export interface RiskConfig {
    * @default 0.0005 (0.05%)
    */
   boostPriceThreshold?: number;
+  /**
+   * 趋势偏移系数（用于智能订单模式的 Maker 定价策略）
+   * 
+   * 偏移量 = |markPrice - entryPrice| × trendOffsetMultiplier
+   * 
+   * @default 0.3
+   */
+  trendOffsetMultiplier?: number;
 }
 
 /**

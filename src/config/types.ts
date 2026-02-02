@@ -78,6 +78,37 @@ export interface PairRiskConfig {
    * @default 0.0005 (0.05%, about $50 for BTC at $100k)
    */
   boostPriceThreshold?: number;
+
+  /**
+   * 趋势偏移系数（用于智能订单模式的 Maker 定价策略）
+   * 
+   * 仅在智能订单模式（enableSmartOrder: true）下生效。
+   * 
+   * 当满足趋势条件时使用激进偏移：
+   * - 加仓 + 被套：顺趋势偏移（DCA 抄底/逃顶，趋势延续概率高）
+   * - 减仓 + 盈利：顺趋势偏移（止盈场景，趋势延续概率高）
+   * 
+   * 偏移量计算：
+   * - priceDiff = |markPrice - entryPrice|（当前浮动幅度）
+   * - trendOffset = priceDiff × trendOffsetMultiplier
+   * 
+   * 挂单价格：
+   * - 买入（市场下跌）：bestBid - trendOffset（买更便宜）
+   * - 卖出（市场上涨）：bestAsk + trendOffset（卖更贵）
+   * 
+   * 值越大，挂单越激进：
+   * - 0.1 = 偏移 priceDiff 的 10%（保守）
+   * - 0.3 = 偏移 priceDiff 的 30%（推荐，风险收益平衡）
+   * - 0.5 = 偏移 priceDiff 的 50%（激进）
+   * 
+   * 风险说明：
+   * - 值越大，成交等待时间越长，但潜在收益更高
+   * - 未成交订单由对账机制兜底
+   * - 设为 0 则回退到保守策略（使用 bestBid/bestAsk）
+   * 
+   * @default 0.3
+   */
+  trendOffsetMultiplier?: number;
 }
 
 /**
@@ -238,6 +269,7 @@ export const CONFIG_DEFAULTS = {
       maxPositionDeviationPercent: 5,
       marketOrderSlippage: 0.05,
       boostPriceThreshold: 0.0005,
+      trendOffsetMultiplier: 0.3,  // 趋势偏移系数，推荐 0.3
     },
     // 智能订单模式默认配置
     enableSmartOrder: false,
