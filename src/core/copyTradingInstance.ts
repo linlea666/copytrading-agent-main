@@ -159,8 +159,11 @@ export class CopyTradingInstance {
       ...(pairConfig.risk.marketOrderSlippage !== undefined && {
         marketOrderSlippage: pairConfig.risk.marketOrderSlippage,
       }),
-      // Smart order mode: enable limit order cleanup
+      // Smart order mode: enable limit order cleanup and reduce order timeout
       enableSmartOrder: this.isSmartOrderMode,
+      ...(pairConfig.risk.reduceOrderTimeoutMs !== undefined && {
+        reduceOrderTimeoutMs: pairConfig.risk.reduceOrderTimeoutMs,
+      }),
     });
   }
 

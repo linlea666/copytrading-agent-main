@@ -48,6 +48,13 @@ export interface RiskConfig {
    * @default 0.3
    */
   trendOffsetMultiplier?: number;
+
+  /**
+   * 减仓限价单超时时间（毫秒）
+   * 超时后取消限价单并执行市价减仓
+   * @default 180000 (3分钟)
+   */
+  reduceOrderTimeoutMs?: number;
 }
 
 /**

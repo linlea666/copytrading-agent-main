@@ -43,7 +43,8 @@
         "maxPositionDeviationPercent": 5,
         "marketOrderSlippage": 0.05,
         "boostPriceThreshold": 0.005,
-        "trendOffsetMultiplier": 0.3
+        "trendOffsetMultiplier": 0.3,
+        "reduceOrderTimeoutMs": 180000
       },
       "minOrderNotionalUsd": 12,
       "syncDebounceMs": 1000,
@@ -58,7 +59,10 @@
       "_comment_smart_7": "trendOffsetMultiplier: 趋势偏移系数，用于激进定价策略",
       "_comment_smart_8": "  - 0.1 = 保守（偏移 priceDiff 的 10%）",
       "_comment_smart_9": "  - 0.3 = 推荐（偏移 priceDiff 的 30%，风险收益平衡）",
-      "_comment_smart_10": "  - 0.5 = 激进（偏移 priceDiff 的 50%）"
+      "_comment_smart_10": "  - 0.5 = 激进（偏移 priceDiff 的 50%）",
+      "_comment_smart_11": "reduceOrderTimeoutMs: 减仓限价单超时时间（毫秒）",
+      "_comment_smart_12": "  - 超时后自动取消限价单并执行市价减仓",
+      "_comment_smart_13": "  - 默认 180000（3分钟），设为 0 禁用"
     }
   ]
 }

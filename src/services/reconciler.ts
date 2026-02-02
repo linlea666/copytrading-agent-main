@@ -41,6 +41,13 @@ export interface ReconcilerFallbackDeps {
    * 启用时会在对账时清理孤立的限价单（领航员无仓位时取消跟单者该币种的限价单）
    */
   enableSmartOrder?: boolean;
+  /**
+   * 减仓限价单超时时间（毫秒）
+   * 超时后取消限价单并执行市价减仓
+   * 设为 0 禁用超时检查
+   * @default 180000 (3分钟)
+   */
+  reduceOrderTimeoutMs?: number;
 }
 
 /**
@@ -109,6 +116,9 @@ export class Reconciler {
       // Smart order mode: cleanup orphaned limit orders
       if (this.fallbackDeps.enableSmartOrder) {
         await this.cleanupOrphanedLimitOrders(leaderPositions);
+        
+        // Cleanup timed-out reduce orders (and execute market order fallback)
+        await this.cleanupTimedOutReduceOrders(followerPositions);
       }
     }
   }
@@ -215,6 +225,193 @@ export class Reconciler {
       }
     } catch (error) {
       this.log.error(`[限价单清理] 获取未成交订单失败`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /**
+   * Cleans up timed-out reduce orders and executes market order fallback.
+   * 
+   * 减仓限价单超时处理：
+   * 1. 获取所有未成交订单
+   * 2. 过滤出减仓订单（side 与仓位方向相反）
+   * 3. 检查是否超时
+   * 4. 超时则取消订单并执行市价减仓
+   * 
+   * 判断减仓订单的逻辑：
+   * - 多仓（size > 0）+ 卖单（side = A）= 减仓
+   * - 空仓（size < 0）+ 买单（side = B）= 减仓
+   */
+  private async cleanupTimedOutReduceOrders(
+    followerPositions: ReadonlyMap<string, { size: number }>,
+  ): Promise<void> {
+    if (!this.fallbackDeps) return;
+
+    const timeoutMs = this.fallbackDeps.reduceOrderTimeoutMs ?? 180_000;  // 默认 3 分钟
+    
+    // 超时时间为 0 表示禁用
+    if (timeoutMs <= 0) return;
+
+    const { exchangeClient, metadataService } = this.fallbackDeps;
+    const now = Date.now();
+
+    try {
+      // 获取跟单者所有未成交订单
+      const openOrders = await this.infoClient.openOrders({ user: this.followerAddress });
+
+      if (!openOrders || openOrders.length === 0) {
+        return;
+      }
+
+      // 遍历订单，检查是否为超时的减仓订单
+      for (const order of openOrders) {
+        const coin = order.coin;
+        const followerPos = followerPositions.get(coin);
+        const followerSize = followerPos?.size ?? 0;
+
+        // 判断是否为减仓订单
+        // 多仓（size > 0）+ 卖单（side = A）= 减仓
+        // 空仓（size < 0）+ 买单（side = B）= 减仓
+        const isLong = followerSize > EPSILON;
+        const isShort = followerSize < -EPSILON;
+        const isSellOrder = order.side === "A";
+        const isBuyOrder = order.side === "B";
+        
+        const isReduceOrder = (isLong && isSellOrder) || (isShort && isBuyOrder);
+        
+        if (!isReduceOrder) {
+          continue;  // 不是减仓订单，跳过
+        }
+
+        // 检查订单是否超时
+        const orderAge = now - order.timestamp;
+        if (orderAge < timeoutMs) {
+          continue;  // 未超时，跳过
+        }
+
+        const orderAgeMinutes = (orderAge / 60_000).toFixed(1);
+        const timeoutMinutes = (timeoutMs / 60_000).toFixed(1);
+
+        this.log.info(`⏰ [减仓超时] 发现超时的减仓限价单`, {
+          coin,
+          oid: order.oid,
+          side: isSellOrder ? "卖" : "买",
+          size: order.sz,
+          price: "$" + order.limitPx,
+          orderAge: orderAgeMinutes + "分钟",
+          timeout: timeoutMinutes + "分钟",
+        });
+
+        // 1. 取消超时订单
+        const metadata = metadataService.getByCoin(coin);
+        if (!metadata) {
+          this.log.warn(`[减仓超时] 无法获取币种元数据，跳过`, { coin });
+          continue;
+        }
+
+        try {
+          await exchangeClient.cancel({
+            cancels: [{ a: metadata.assetId, o: order.oid }],
+          });
+          this.log.info(`✅ [减仓超时] 已取消超时限价单`, {
+            coin,
+            oid: order.oid,
+          });
+        } catch (cancelError) {
+          this.log.error(`[减仓超时] 取消订单失败`, {
+            coin,
+            oid: order.oid,
+            error: cancelError instanceof Error ? cancelError.message : String(cancelError),
+          });
+          continue;  // 取消失败，跳过市价补单
+        }
+
+        // 2. 执行市价减仓补单
+        const orderSize = parseFloat(order.sz);
+        await this.executeMarketReduceFallback(coin, orderSize, isSellOrder ? "sell" : "buy");
+      }
+    } catch (error) {
+      this.log.error(`[减仓超时] 检查超时订单失败`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /**
+   * Executes a market order to fulfill a timed-out reduce order.
+   * 
+   * @param coin - The coin symbol
+   * @param size - The order size
+   * @param action - "buy" or "sell"
+   */
+  private async executeMarketReduceFallback(
+    coin: string,
+    size: number,
+    action: "buy" | "sell",
+  ): Promise<void> {
+    if (!this.fallbackDeps) return;
+
+    const { exchangeClient, metadataService, marketOrderSlippage } = this.fallbackDeps;
+
+    try {
+      const metadata = metadataService.getByCoin(coin);
+      if (!metadata) {
+        this.log.error(`[减仓超时] 无法获取币种元数据`, { coin });
+        return;
+      }
+
+      const markPrice = metadataService.getMarkPrice(coin);
+      if (!markPrice || markPrice <= 0) {
+        this.log.error(`[减仓超时] 无法获取标记价格`, { coin });
+        return;
+      }
+
+      // 计算滑点价格
+      const slippage = marketOrderSlippage ?? 0.05;
+      const priceMultiplier = action === "buy" ? 1 + slippage : 1 - slippage;
+      const limitPrice = clamp(markPrice * priceMultiplier, markPrice * 0.5, markPrice * 2);
+      const priceStr = roundToMarkPricePrecision(limitPrice, markPrice);
+      const sizeStr = size.toFixed(metadata.sizeDecimals);
+
+      this.log.info(`🔄 [减仓超时] 执行市价减仓补单`, {
+        coin,
+        action: action === "buy" ? "买入" : "卖出",
+        size: sizeStr,
+        price: "$" + priceStr,
+        slippage: (slippage * 100).toFixed(1) + "%",
+      });
+
+      const order = {
+        a: metadata.assetId,
+        b: action === "buy",
+        p: priceStr,
+        s: sizeStr,
+        r: true, // reduceOnly
+        t: { limit: { tif: "Ioc" as const } },
+        c: `0x${randomUUID().replace(/-/g, "").slice(0, 32)}`,
+      };
+
+      const response = await exchangeClient.order({
+        orders: [order],
+        grouping: "na",
+      });
+
+      const statuses = response.response.data.statuses;
+      const errors = statuses.filter((s) => "error" in s);
+
+      if (errors.length > 0) {
+        this.log.error(`[减仓超时] 市价减仓失败`, {
+          coin,
+          errors: errors.map((e) => ("error" in e ? e.error : "unknown")),
+        });
+        return;
+      }
+
+      this.log.info(`✅ [减仓超时] 市价减仓成功`, { coin, size: sizeStr });
+    } catch (error) {
+      this.log.error(`[减仓超时] 执行市价减仓异常`, {
+        coin,
         error: error instanceof Error ? error.message : String(error),
       });
     }

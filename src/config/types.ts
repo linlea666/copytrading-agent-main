@@ -109,6 +109,30 @@ export interface PairRiskConfig {
    * @default 0.3
    */
   trendOffsetMultiplier?: number;
+
+  /**
+   * 减仓限价单超时时间（毫秒）
+   * 
+   * 仅在智能订单模式（enableSmartOrder: true）下生效。
+   * 
+   * 减仓限价单超时后的处理：
+   * 1. 取消超时的减仓限价单
+   * 2. 立即执行市价减仓（确保风险控制）
+   * 
+   * 为什么减仓需要超时处理：
+   * - 减仓是风险控制行为，领航员减仓通常是为了降低风险
+   * - 限价单未成交意味着跟单者风险敞口未降低
+   * - 市价补单确保减仓执行，与领航员保持同步
+   * 
+   * 与加仓的区别：
+   * - 加仓限价单不设超时（保持现状，由对账机制兜底）
+   * - 减仓限价单超时后自动市价补单
+   * 
+   * 设为 0 禁用超时检查（减仓限价单将一直挂单）
+   * 
+   * @default 180000 (3分钟)
+   */
+  reduceOrderTimeoutMs?: number;
 }
 
 /**
@@ -269,7 +293,8 @@ export const CONFIG_DEFAULTS = {
       maxPositionDeviationPercent: 5,
       marketOrderSlippage: 0.05,
       boostPriceThreshold: 0.0005,
-      trendOffsetMultiplier: 0.3,  // 趋势偏移系数，推荐 0.3
+      trendOffsetMultiplier: 0.3,       // 趋势偏移系数，推荐 0.3
+      reduceOrderTimeoutMs: 180_000,    // 减仓限价单超时 3 分钟
     },
     // 智能订单模式默认配置
     enableSmartOrder: false,
